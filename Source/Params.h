@@ -29,3 +29,4 @@ inline constexpr const char* drift      = "drift";       // 0..1
 inline constexpr const char* mix        = "mix";         // dry/wet 0..1
 inline constexpr const char* outLevel   = "outLevel";    // niveau de sortie, dB
 }
+ 
