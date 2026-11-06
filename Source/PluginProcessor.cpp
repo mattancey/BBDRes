@@ -14,6 +14,9 @@ BBDResAudioProcessor::BBDResAudioProcessor()
     loopLpP   = apvts.getRawParameterValue (ParamIDs::loopLP);
     mixP      = apvts.getRawParameterValue (ParamIDs::mix);
     levelP    = apvts.getRawParameterValue (ParamIDs::outLevel);
+    driveP    = apvts.getRawParameterValue (ParamIDs::drive);
+    curveP    = apvts.getRawParameterValue (ParamIDs::driveCurve);
+    bbdP      = apvts.getRawParameterValue (ParamIDs::bbd);
 }
  
 juce::AudioProcessorValueTreeState::ParameterLayout BBDResAudioProcessor::createLayout()
@@ -35,6 +38,20 @@ juce::AudioProcessorValueTreeState::ParameterLayout BBDResAudioProcessor::create
  
     juce::AudioProcessorValueTreeState::ParameterLayout layout;
  
+    // Section Input
+    layout.add (std::make_unique<juce::AudioParameterFloat> (
+        juce::ParameterID { ParamIDs::drive, 1 }, "Drive",
+        Range (0.0f, 1.0f, 0.001f), 0.0f, Attr().withStringFromValueFunction (percent)));
+ 
+    layout.add (std::make_unique<juce::AudioParameterChoice> (
+        juce::ParameterID { ParamIDs::driveCurve, 1 }, "Drive Curve",
+        juce::StringArray { "Soft", "Asym", "Fold" }, 0));
+ 
+    layout.add (std::make_unique<juce::AudioParameterFloat> (
+        juce::ParameterID { ParamIDs::inputLP, 1 }, "Input LP 12dB",
+        Range (200.0f, 20000.0f, 0.0f, 0.3f), 8000.0f, Attr().withStringFromValueFunction (hz)));
+ 
+    // Section Resonator
     layout.add (std::make_unique<juce::AudioParameterFloat> (
         juce::ParameterID { ParamIDs::tune, 1 }, "Tune",
         Range (24.0f, 96.0f, 1.0f), 48.0f, Attr().withStringFromValueFunction (note)));
@@ -48,13 +65,14 @@ juce::AudioProcessorValueTreeState::ParameterLayout BBDResAudioProcessor::create
         Range (0.0f, 1.0f, 0.001f), 0.7f, Attr().withStringFromValueFunction (percent)));
  
     layout.add (std::make_unique<juce::AudioParameterFloat> (
-        juce::ParameterID { ParamIDs::inputLP, 1 }, "Input LP 12dB",
-        Range (200.0f, 20000.0f, 0.0f, 0.3f), 8000.0f, Attr().withStringFromValueFunction (hz)));
- 
-    layout.add (std::make_unique<juce::AudioParameterFloat> (
         juce::ParameterID { ParamIDs::loopLP, 1 }, "Loop LP 6dB",
         Range (200.0f, 20000.0f, 0.0f, 0.3f), 6000.0f, Attr().withStringFromValueFunction (hz)));
  
+    layout.add (std::make_unique<juce::AudioParameterFloat> (
+        juce::ParameterID { ParamIDs::bbd, 1 }, "BBD",
+        Range (0.0f, 1.0f, 0.001f), 0.3f, Attr().withStringFromValueFunction (percent)));
+ 
+    // Sortie
     layout.add (std::make_unique<juce::AudioParameterFloat> (
         juce::ParameterID { ParamIDs::mix, 1 }, "Mix",
         Range (0.0f, 1.0f, 0.001f), 0.5f, Attr().withStringFromValueFunction (percent)));
@@ -75,6 +93,9 @@ BBDResAudioProcessor::Targets BBDResAudioProcessor::readTargets() const
     t.loopLog2 = std::log2 (loopLpP->load());
     t.mix      = mixP->load();
     t.level    = juce::Decibels::decibelsToGain (levelP->load());
+    t.drive    = driveP->load();
+    t.bbd      = bbdP->load();
+    t.curve    = juce::roundToInt (curveP->load());
     return t;
 }
  
@@ -83,8 +104,8 @@ void BBDResAudioProcessor::prepareToPlay (double sampleRate, int)
     const float fs = (float) sampleRate;
     const float controlRate = fs / (float) kControlBlock;
  
-    for (auto& r : resonators)
-        r.prepare (fs);
+    for (int i = 0; i < 2; ++i)
+        resonators[i].prepare (fs, (std::uint32_t) (i + 1));
  
     tuneSm.prepare (controlRate, 0.03f);   // glissando de Tune d'environ 30 ms
     fbSm.prepare (controlRate, 0.02f);
@@ -92,6 +113,8 @@ void BBDResAudioProcessor::prepareToPlay (double sampleRate, int)
     loopSm.prepare (controlRate, 0.02f);
     mixSm.prepare (controlRate, 0.02f);
     levelSm.prepare (controlRate, 0.02f);
+    driveSm.prepare (controlRate, 0.02f);
+    bbdSm.prepare (controlRate, 0.05f);
  
     const auto t = readTargets();
     tuneSm.snap (t.semis);
@@ -100,6 +123,8 @@ void BBDResAudioProcessor::prepareToPlay (double sampleRate, int)
     loopSm.snap (t.loopLog2);
     mixSm.snap (t.mix);
     levelSm.snap (t.level);
+    driveSm.snap (t.drive);
+    bbdSm.snap (t.bbd);
     mixPrev = t.mix;
     levelPrev = t.level;
 }
@@ -131,15 +156,19 @@ void BBDResAudioProcessor::processBlock (juce::AudioBuffer<float>& buffer, juce:
     {
         const int len = juce::jmin (kControlBlock, numSamples - start);
  
-        const float semis  = tuneSm.next (t.semis);
-        const float fb     = fbSm.next (t.feedback);
-        const float inHz   = std::exp2 (inSm.next (t.inLog2));
-        const float loopHz = std::exp2 (loopSm.next (t.loopLog2));
+        bbdres::ResonatorParams rp;
+        rp.semitones = tuneSm.next (t.semis);
+        rp.feedback  = fbSm.next (t.feedback);
+        rp.inputLpHz = std::exp2 (inSm.next (t.inLog2));
+        rp.loopLpHz  = std::exp2 (loopSm.next (t.loopLog2));
+        rp.drive     = driveSm.next (t.drive);
+        rp.curve     = t.curve;
+        rp.bbd       = bbdSm.next (t.bbd);
         const float mixNew = mixSm.next (t.mix);
         const float lvlNew = levelSm.next (t.level);
  
         for (int c = 0; c < numCh; ++c)
-            resonators[c].update (semis, fb, inHz, loopHz);
+            resonators[c].update (rp);
  
         for (int i = 0; i < len; ++i)
         {
