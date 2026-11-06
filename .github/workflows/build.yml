@@ -1,0 +1,37 @@
+name: Build macOS
+ 
+on:
+  push:
+  workflow_dispatch:
+ 
+permissions:
+  contents: read
+ 
+jobs:
+  build:
+    runs-on: macos-latest
+    steps:
+      - name: Récupérer le code
+        uses: actions/checkout@v4
+ 
+      - name: Configurer
+        run: cmake -S . -B build -DCMAKE_BUILD_TYPE=Release "-DCMAKE_OSX_ARCHITECTURES=arm64;x86_64"
+ 
+      - name: Compiler
+        run: cmake --build build --config Release --parallel 4
+ 
+      - name: Préparer le paquet
+        run: |
+          mkdir -p dist
+          find build -type d -name "*.vst3" -exec cp -R {} dist/ \;
+          find build -type d -name "*.component" -exec cp -R {} dist/ \;
+          for f in dist/*; do codesign --force --deep -s - "$f"; done
+          ls -la dist
+          cd dist && zip -ry ../plugin.zip . && cd ..
+ 
+      - name: Publier le résultat
+        uses: actions/upload-artifact@v4
+        with:
+          name: BBDRes-macOS
+          path: plugin.zip
+ 
