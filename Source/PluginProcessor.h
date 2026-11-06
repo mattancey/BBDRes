@@ -40,7 +40,8 @@ private:
     // Valeurs cibles lues dans les paramètres (avant lissage)
     struct Targets
     {
-        float semis, feedback, inLog2, loopLog2, mix, level;
+        float semis, feedback, inLog2, loopLog2, mix, level, drive, bbd;
+        int curve;
     };
     Targets readTargets() const;
  
@@ -53,9 +54,12 @@ private:
     std::atomic<float>* loopLpP = nullptr;
     std::atomic<float>* mixP = nullptr;
     std::atomic<float>* levelP = nullptr;
+    std::atomic<float>* driveP = nullptr;
+    std::atomic<float>* curveP = nullptr;
+    std::atomic<float>* bbdP = nullptr;
  
     bbdres::Resonator resonators[2];
-    bbdres::Smoother tuneSm, fbSm, inSm, loopSm, mixSm, levelSm;
+    bbdres::Smoother tuneSm, fbSm, inSm, loopSm, mixSm, levelSm, driveSm, bbdSm;
     float mixPrev = 0.5f, levelPrev = 1.0f;
  
     JUCE_DECLARE_NON_COPYABLE_WITH_LEAK_DETECTOR (BBDResAudioProcessor)
