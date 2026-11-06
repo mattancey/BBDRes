@@ -139,6 +139,8 @@ struct ResonatorParams
     float drive = 0.0f;        // 0..1
     int curve = 0;             // 0 = Soft, 1 = Asym, 2 = Fold
     float bbd = 0.0f;          // 0..1 : caractère BBD
+    float noiseGain = 1.0f;    // réglage interne : multiplicateur du souffle BBD
+    float jitterGain = 1.0f;   // réglage interne : multiplicateur du jitter d'horloge
 };
  
 // Résonateur : filtre en peigne à feedback positif, accordé par le temps de retard
@@ -187,14 +189,14 @@ public:
         // Une ligne de 2R étages bouclée sur une période 1/f0 échantillonne à R*f0 :
         // moins il y a d'étages (R petit), plus les graves sont sombres.
         const float bbdAmt = std::clamp (p.bbd, 0.0f, 1.0f);
-        const float R = 4096.0f * std::exp2 (-6.0f * bbdAmt);
+        const float R = 1024.0f * std::exp2 (-4.5f * bbdAmt);
         const float bwHz = 0.2f * R * f0;
         bwOn = bbdAmt > 0.001f && bwHz < 0.45f * fs;
         float pd = loop.phaseDelay (f0, fs);
         if (bwOn) { bw.setLowpass (bwHz, fs); pd += bw.phaseDelay (f0, fs); }
         else      { bw.reset(); }
-        noiseAmp = 0.0016f * bbdAmt * bbdAmt;
-        jitterAmt = 0.00012f * bbdAmt;
+        noiseAmp = 0.00104f * bbdAmt * bbdAmt * p.noiseGain;   // souffle : -35 % par rapport à l'étape 3
+        jitterAmt = 0.0005f * bbdAmt * p.jitterGain;            // grain d'horloge, plus audible qu'avant
  
         // Les filtres de la boucle retardent la phase : on les compense pour rester juste
         delaySamples = std::clamp (fs / f0 - pd, 2.0f, maxDelay);
@@ -251,4 +253,3 @@ private:
     DcBlocker dc;
 };
 } // namespace bbdres
- 
