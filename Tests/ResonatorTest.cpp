@@ -1,5 +1,7 @@
 // Tests du coeur DSP : stabilité, justesse de l'accord, comportement du caractère BBD.
 #include "../Source/Dsp/Resonator.h"
+#include "../Source/Dsp/Pitch.h"
+#include "../Source/Dsp/Modulation.h"
 #include <cstdio>
 #include <cstdlib>
  
@@ -49,32 +51,36 @@ static void testStability (float fs, bool full)
     check (worst < 8.0f, "sortie trop forte");
 }
  
-// Justesse : mesure la période de l'écho par autocorrélation
+// Justesse : position du pic de résonance du fondamental (balayage spectral fin de la réponse impulsionnelle)
 static float measureCents (float fs, float note, float bbd)
 {
     Resonator r; r.prepare (fs);
     ResonatorParams p; p.semitones = note; p.feedback = 0.9f; p.inputLpHz = 20000.0f;
     p.loopLpHz = 12000.0f; p.bbd = bbd;
+    p.noiseGain = 0.0f; p.jitterGain = 0.0f;   // on mesure l'accord, sans le souffle qui fausse la mesure
     r.update (p); r.reset();
     const int n = (int) (fs * 0.5f);
     std::vector<float> y ((size_t) n);
     for (int i = 0; i < n; ++i) y[(size_t) i] = r.process (i == 0 ? 1.0f : 0.0f);
  
-    const float f0 = 440.0f * std::exp2 ((note - 69.0f) / 12.0f);
-    const float expected = fs / f0;
-    const int lo = (int) (expected * 0.8f), hi = (int) (expected * 1.2f);
-    std::vector<double> ac ((size_t) hi + 2, 0.0);
-    int best = lo;
-    for (int lag = lo; lag <= hi + 1; ++lag)
+    const double f0 = 440.0 * std::pow (2.0, ((double) note - 69.0) / 12.0);
+    const int steps = 600;
+    std::vector<double> mag ((size_t) steps + 1);
+    int best = 0;
+    for (int k = 0; k <= steps; ++k)
     {
-        double s = 0.0;
-        for (int i = 0; i + lag < n; ++i) s += (double) y[(size_t) i] * (double) y[(size_t) (i + lag)];
-        ac[(size_t) lag] = s;
-        if (lag <= hi && s > ac[(size_t) best]) best = lag;
+        const double f = f0 * (0.97 + 0.06 * (double) k / (double) steps);
+        const double w = 2.0 * 3.14159265358979 * f / (double) fs;
+        double re = 0.0, im = 0.0;
+        for (int i = 0; i < n; ++i) { re += (double) y[(size_t) i] * std::cos (w * i); im -= (double) y[(size_t) i] * std::sin (w * i); }
+        mag[(size_t) k] = re * re + im * im;
+        if (mag[(size_t) k] > mag[(size_t) best]) best = k;
     }
-    const double a = ac[(size_t) best - 1], b = ac[(size_t) best], c = ac[(size_t) best + 1];
+    best = std::clamp (best, 1, steps - 1);
+    const double a = mag[(size_t) best - 1], b = mag[(size_t) best], c = mag[(size_t) best + 1];
     const double frac = 0.5 * (a - c) / (a - 2.0 * b + c);
-    return (float) (1200.0 * std::log2 ((double) expected / ((double) best + frac)));
+    const double fMeasured = f0 * (0.97 + 0.06 * ((double) best + frac) / (double) steps);
+    return (float) (1200.0 * std::log2 (fMeasured / f0));
 }
  
 // Niveau RMS de la sortie pour une entrée silencieuse
@@ -105,8 +111,66 @@ static float highBandEnergy (float bbd)
     return (float) e;
 }
  
+// Quantification : le résultat est dans la gamme et c'est bien la note la plus proche
+static void testQuantizer()
+{
+    check (bbdres::quantizeToScale (61.2f, 0, bbdres::kScales[1].mask) == 62.0f, "Do majeur : 61.2 -> 62");
+    check (bbdres::quantizeToScale (66.5f, 0, bbdres::kScales[1].mask) == 67.0f, "Do majeur : 66.5 -> 67");
+    check (bbdres::quantizeToScale (61.0f, 0, bbdres::kScales[0].mask) == 61.0f, "chromatique : inchange");
+    check (bbdres::quantizeToScale (62.0f, 2, bbdres::kScales[3].mask) == 62.0f, "Re dorien : la tonique reste");
+    bool allIn = true, nearest = true;
+    for (int sc = 0; sc < bbdres::kNumScales; ++sc)
+        for (int root = 0; root < 12; ++root)
+            for (int i = 0; i < 400; ++i)
+            {
+                const float n = 24.0f + 72.0f * (float) i / 400.0f;
+                const float q = bbdres::quantizeToScale (n, root, bbdres::kScales[sc].mask);
+                const int degree = ((((int) std::lround (q) - root) % 12) + 12) % 12;
+                if (! ((bbdres::kScales[sc].mask >> degree) & 1u)) allIn = false;
+                for (int k = -12; k <= 12; ++k)
+                {
+                    const float c = std::floor (n) + (float) k;
+                    const int dg = ((((int) c - root) % 12) + 12) % 12;
+                    if (((bbdres::kScales[sc].mask >> dg) & 1u) && std::fabs (n - c) < std::fabs (n - q) - 1.0e-4f)
+                        nearest = false;
+                }
+            }
+    check (allIn, "quantification : note hors gamme");
+    check (nearest, "quantification : ce n'est pas la note la plus proche");
+    std::printf ("quantification : %d gammes x 12 toniques verifiees\n", bbdres::kNumScales);
+}
+ 
+// LFO : bornes, formes, enveloppe
+static void testModulation()
+{
+    for (int shape = 0; shape < 6; ++shape)
+    {
+        bbdres::Lfo l; l.prepare (3000.0f, 7u); l.setRateHz (2.0f);
+        float lo = 9.0f, hi = -9.0f; bool ok = true;
+        for (int i = 0; i < 3000 * 20; ++i)
+        {
+            const float v = l.next (shape);
+            if (! std::isfinite (v)) ok = false;
+            lo = std::min (lo, v); hi = std::max (hi, v);
+        }
+        check (ok && lo >= -1.0001f && hi <= 1.0001f, "LFO hors des bornes -1..+1");
+        std::printf ("LFO forme %d : min %.3f max %.3f\n", shape, lo, hi);
+        if (shape == 0) check (lo < -0.99f && hi > 0.99f, "sinus : amplitude incomplete");
+    }
+    bbdres::EnvFollower e; e.prepare (3000.0f);
+    for (int i = 0; i < 90; ++i) e.next (1.0f);   // 30 ms
+    check (e.y > 0.9f, "enveloppe : attaque trop lente");
+    for (int i = 0; i < 600; ++i) e.next (0.0f);
+    check (e.y < 0.5f && e.y > 0.0f, "enveloppe : relachement incorrect");
+    check (std::fabs (bbdres::levelToUnit (1.0f) - 1.0f) < 1.0e-4f, "niveau 0 dB -> 1");
+    check (std::fabs (bbdres::levelToUnit (0.1f) - 0.5f) < 1.0e-3f, "niveau -20 dB -> 0.5");
+    check (bbdres::levelToUnit (0.001f) == 0.0f, "niveau -60 dB -> 0");
+}
+ 
 int main()
 {
+    testQuantizer();
+    testModulation();
     testStability (44100.0f, true);
     testStability (48000.0f, false);
     testStability (192000.0f, false);
@@ -117,7 +181,7 @@ int main()
     {
         const float c = measureCents (48000.0f, n, bb);
         std::printf ("bbd %.1f  note %.0f : ecart d'accord = %+.2f cents\n", bb, n, c);
-        check (std::fabs (c) < 5.0f, "accord hors tolerance (5 cents)");
+        check (std::fabs (c) < 1.0f, "accord hors tolerance (1 cent)");
     }
  
     const float rms0 = silentRms (0.0f), rms1 = silentRms (1.0f);
@@ -132,4 +196,3 @@ int main()
     std::printf (failures == 0 ? "TOUS LES TESTS PASSENT\n" : "%d ECHEC(S)\n", failures);
     return failures == 0 ? 0 : 1;
 }
- 
