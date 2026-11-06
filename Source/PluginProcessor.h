@@ -2,6 +2,8 @@
  
 #include <juce_audio_processors/juce_audio_processors.h>
 #include "Dsp/Resonator.h"
+#include "Dsp/Pitch.h"
+#include "Dsp/Modulation.h"
  
 class BBDResAudioProcessor : public juce::AudioProcessor
 {
@@ -37,11 +39,13 @@ public:
 private:
     static juce::AudioProcessorValueTreeState::ParameterLayout createLayout();
  
-    // Valeurs cibles lues dans les paramètres (avant lissage)
+    // Valeurs cibles lues dans les paramètres (avant modulation et lissage)
     struct Targets
     {
-        float semis, feedback, inLog2, loopLog2, mix, level, drive, bbd;
-        int curve;
+        float tune, fine, feedback, inLog2, loopLog2, mix, level, drive, bbd;
+        float lfoRate, lfoDepth, dynamics, drift;
+        int curve, root, scale, lfoShape, lfoTarget;
+        bool quantize;
     };
     Targets readTargets() const;
  
@@ -57,11 +61,21 @@ private:
     std::atomic<float>* driveP = nullptr;
     std::atomic<float>* curveP = nullptr;
     std::atomic<float>* bbdP = nullptr;
+    std::atomic<float>* rootP = nullptr;
+    std::atomic<float>* scaleP = nullptr;
+    std::atomic<float>* quantizeP = nullptr;
+    std::atomic<float>* lfoShapeP = nullptr;
+    std::atomic<float>* lfoRateP = nullptr;
+    std::atomic<float>* lfoDepthP = nullptr;
+    std::atomic<float>* lfoTargetP = nullptr;
+    std::atomic<float>* dynamicsP = nullptr;
+    std::atomic<float>* driftP = nullptr;
  
     bbdres::Resonator resonators[2];
     bbdres::Smoother tuneSm, fbSm, inSm, loopSm, mixSm, levelSm, driveSm, bbdSm;
+    bbdres::Lfo lfo, driftTuneLfo, driftFilterLfo;
+    bbdres::EnvFollower env;
     float mixPrev = 0.5f, levelPrev = 1.0f;
  
     JUCE_DECLARE_NON_COPYABLE_WITH_LEAK_DETECTOR (BBDResAudioProcessor)
 };
- 
