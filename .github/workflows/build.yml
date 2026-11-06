@@ -12,7 +12,7 @@ jobs:
     runs-on: macos-latest
     steps:
       - name: Récupérer le code
-        uses: actions/checkout@v4
+        uses: actions/checkout@v6
  
       - name: Tester la DSP
         run: |
@@ -35,7 +35,7 @@ jobs:
           cd dist && zip -ry ../plugin.zip . && cd ..
  
       - name: Publier le résultat
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@v6
         with:
           name: BBDRes-macOS
           path: plugin.zip
