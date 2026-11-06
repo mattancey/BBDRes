@@ -5,6 +5,8 @@
  
 #include <algorithm>
 #include <cmath>
+#include <complex>
+#include <cstdint>
 #include <vector>
  
 namespace bbdres
@@ -49,6 +51,18 @@ struct Biquad
         return y;
     }
     void reset() { z1 = z2 = 0.0f; }
+ 
+    // Retard de phase (en échantillons) à la fréquence f
+    float phaseDelay (float f, float fs) const
+    {
+        const float w = 2.0f * kPi * f / fs;
+        if (w < 1.0e-6f) return 0.0f;
+        const std::complex<float> zi = std::polar (1.0f, -w);
+        const std::complex<float> z2c = zi * zi;
+        const std::complex<float> num = b0 + b1 * zi + b2 * z2c;
+        const std::complex<float> den = 1.0f + a1 * zi + a2 * z2c;
+        return -std::arg (num / den) / w;
+    }
 };
  
 // Passe-bas 6 dB/oct
@@ -64,7 +78,6 @@ struct OnePole
     float process (float x) { y1 = (1.0f - a) * x + a * y1; return y1; }
     void reset() { y1 = 0.0f; }
  
-    // Retard de phase (en échantillons) à la fréquence f
     float phaseDelay (float f, float fs) const
     {
         const float w = 2.0f * kPi * f / fs;
@@ -116,6 +129,18 @@ private:
     int mask = 0, w = 0;
 };
  
+// Réglages d'un résonateur (valeurs déjà lissées)
+struct ResonatorParams
+{
+    float semitones = 48.0f;   // note MIDI (fractionnaire possible)
+    float feedback = 0.7f;     // 0..1
+    float inputLpHz = 8000.0f; // filtre d'entrée 12 dB
+    float loopLpHz = 6000.0f;  // filtre de boucle 6 dB
+    float drive = 0.0f;        // 0..1
+    int curve = 0;             // 0 = Soft, 1 = Asym, 2 = Fold
+    float bbd = 0.0f;          // 0..1 : caractère BBD
+};
+ 
 // Résonateur : filtre en peigne à feedback positif, accordé par le temps de retard
 class Resonator
 {
@@ -123,49 +148,106 @@ public:
     static constexpr float kMaxLoopGain = 1.02f;  // > 1 : auto-oscillation possible
     static constexpr float kMinFreqHz = 20.0f;
  
-    void prepare (float sampleRate)
+    void prepare (float sampleRate, std::uint32_t seed = 1u)
     {
         fs = sampleRate;
+        rng = seed * 2654435761u + 12345u;
         delay.prepare ((int) (fs / kMinFreqHz) + 8);
         maxDelay = (float) delay.size() - 6.0f;
         dc.prepare (fs);
-        update (48.0f, 0.5f, 8000.0f, 6000.0f);
+        jitterLp.setCutoff (150.0f, fs);
+        // Normalise le bruit de jitter filtré pour qu'il ait un écart-type d'environ 1
+        const float a = jitterLp.a;
+        jitterNorm = std::sqrt (3.0f * (1.0f + a) / (1.0f - a));
+        update (ResonatorParams {});
         reset();
     }
     void reset()
     {
-        delay.reset(); inLp.reset(); loop.reset(); dc.reset();
+        delay.reset(); inLp.reset(); loop.reset(); dc.reset(); bw.reset(); jitterLp.reset();
     }
  
-    // semitones : note MIDI (peut être fractionnaire), feedback : 0..1
-    void update (float semitones, float feedback, float inputLpHz, float loopLpHz)
+    void update (const ResonatorParams& p)
     {
-        const float fb = std::clamp (feedback, 0.0f, 1.0f);
-        const float f0 = 440.0f * std::exp2 ((semitones - 69.0f) / 12.0f);
+        const float fb = std::clamp (p.feedback, 0.0f, 1.0f);
+        const float f0 = 440.0f * std::exp2 ((p.semitones - 69.0f) / 12.0f);
         loopGain = fb * kMaxLoopGain;
         inGain = 1.0f - 0.8f * fb;
-        loop.setCutoff (loopLpHz, fs);
-        inLp.setLowpass (inputLpHz, fs);
-        // Le filtre de boucle retarde la phase : on le compense pour rester juste
-        const float d = fs / f0 - loop.phaseDelay (f0, fs);
-        delaySamples = std::clamp (d, 2.0f, maxDelay);
+        loop.setCutoff (p.loopLpHz, fs);
+        inLp.setLowpass (p.inputLpHz, fs);
+ 
+        // Drive
+        const float dr = std::clamp (p.drive, 0.0f, 1.0f);
+        driveGain = 1.0f + 15.0f * dr;
+        driveComp = 1.0f / std::sqrt (driveGain);
+        driveMix = std::clamp (dr * 10.0f, 0.0f, 1.0f);
+        curve = std::clamp (p.curve, 0, 2);
+ 
+        // Caractère BBD : bande passante liée à l'horloge (donc à la note), bruit, jitter.
+        // Une ligne de 2R étages bouclée sur une période 1/f0 échantillonne à R*f0 :
+        // moins il y a d'étages (R petit), plus les graves sont sombres.
+        const float bbdAmt = std::clamp (p.bbd, 0.0f, 1.0f);
+        const float R = 4096.0f * std::exp2 (-6.0f * bbdAmt);
+        const float bwHz = 0.2f * R * f0;
+        bwOn = bbdAmt > 0.001f && bwHz < 0.45f * fs;
+        float pd = loop.phaseDelay (f0, fs);
+        if (bwOn) { bw.setLowpass (bwHz, fs); pd += bw.phaseDelay (f0, fs); }
+        else      { bw.reset(); }
+        noiseAmp = 0.0016f * bbdAmt * bbdAmt;
+        jitterAmt = 0.00012f * bbdAmt;
+ 
+        // Les filtres de la boucle retardent la phase : on les compense pour rester juste
+        delaySamples = std::clamp (fs / f0 - pd, 2.0f, maxDelay);
     }
  
     float process (float x)
     {
-        const float in = dc.process (inLp.process (x)) * inGain;
-        const float v = loop.process (delay.read (delaySamples));
+        // Drive (courbe choisie), puis filtre d'entrée, blocage du continu et gain
+        float s = x;
+        if (driveMix > 0.0f)
+            s = x + (shape (x * driveGain) * driveComp - x) * driveMix;
+        float in = dc.process (inLp.process (s)) * inGain;
+        if (noiseAmp > 0.0f)
+            in += noiseAmp * nextNoise();
+ 
+        // Jitter d'horloge : petites variations aléatoires du temps de retard
+        float d = delaySamples;
+        if (jitterAmt > 0.0f)
+            d = std::clamp (d * (1.0f + jitterAmt * jitterLp.process (nextNoise()) * jitterNorm), 2.0f, maxDelay);
+ 
+        float v = loop.process (delay.read (d));
+        if (bwOn) v = bw.process (v);
         const float y = in + std::tanh (loopGain * v);  // saturation douce dans la boucle
         delay.push (y);
         return y;
     }
  
 private:
+    float shape (float x) const
+    {
+        switch (curve)
+        {
+            case 1:  return std::tanh (x + 0.4f) - 0.37994896f;  // asymétrique (tanh(0.4))
+            case 2:  return std::sin (x);                          // repli d'onde
+            default: return std::tanh (x);                         // douce
+        }
+    }
+    float nextNoise()
+    {
+        rng ^= rng << 13; rng ^= rng >> 17; rng ^= rng << 5;
+        return (float) (std::int32_t) rng * (1.0f / 2147483648.0f);
+    }
+ 
     float fs = 48000.0f, maxDelay = 1000.0f, delaySamples = 100.0f;
     float loopGain = 0.0f, inGain = 1.0f;
+    float driveGain = 1.0f, driveComp = 1.0f, driveMix = 0.0f;
+    int curve = 0;
+    bool bwOn = false;
+    float noiseAmp = 0.0f, jitterAmt = 0.0f, jitterNorm = 1.0f;
+    std::uint32_t rng = 1u;
     DelayLine delay;
-    Biquad inLp;
-    OnePole loop;
+    Biquad inLp, bw;
+    OnePole loop, jitterLp;
     DcBlocker dc;
 };
 } // namespace bbdres
