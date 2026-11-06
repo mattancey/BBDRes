@@ -1,6 +1,7 @@
 #pragma once
  
 #include <juce_audio_processors/juce_audio_processors.h>
+#include "Dsp/Resonator.h"
  
 class BBDResAudioProcessor : public juce::AudioProcessor
 {
@@ -20,7 +21,7 @@ public:
     bool acceptsMidi() const override { return false; }
     bool producesMidi() const override { return false; }
     bool isMidiEffect() const override { return false; }
-    double getTailLengthSeconds() const override { return 0.0; }
+    double getTailLengthSeconds() const override { return 10.0; }
  
     int getNumPrograms() override { return 1; }
     int getCurrentProgram() override { return 0; }
@@ -36,8 +37,26 @@ public:
 private:
     static juce::AudioProcessorValueTreeState::ParameterLayout createLayout();
  
-    std::atomic<float>* gainParam = nullptr;
-    float lastGain = 1.0f;
+    // Valeurs cibles lues dans les paramètres (avant lissage)
+    struct Targets
+    {
+        float semis, feedback, inLog2, loopLog2, mix, level;
+    };
+    Targets readTargets() const;
+ 
+    static constexpr int kControlBlock = 16;  // les paramètres sont mis à jour tous les 16 échantillons
+ 
+    std::atomic<float>* tuneP = nullptr;
+    std::atomic<float>* fineP = nullptr;
+    std::atomic<float>* feedbackP = nullptr;
+    std::atomic<float>* inputLpP = nullptr;
+    std::atomic<float>* loopLpP = nullptr;
+    std::atomic<float>* mixP = nullptr;
+    std::atomic<float>* levelP = nullptr;
+ 
+    bbdres::Resonator resonators[2];
+    bbdres::Smoother tuneSm, fbSm, inSm, loopSm, mixSm, levelSm;
+    float mixPrev = 0.5f, levelPrev = 1.0f;
  
     JUCE_DECLARE_NON_COPYABLE_WITH_LEAK_DETECTOR (BBDResAudioProcessor)
 };
