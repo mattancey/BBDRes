@@ -29,6 +29,8 @@ juce_add_plugin(BBDRes
  
 target_sources(BBDRes PRIVATE
     Source/PluginProcessor.h
+    Source/Params.h
+    Source/Dsp/Resonator.h
     Source/PluginProcessor.cpp)
  
 target_compile_definitions(BBDRes PUBLIC
