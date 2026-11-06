@@ -183,4 +183,3 @@ juce::AudioProcessor* JUCE_CALLTYPE createPluginFilter()
     return new BBDResAudioProcessor();
 }
  
-Claude a terminé sa réponse.
