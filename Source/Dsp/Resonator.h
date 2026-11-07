@@ -52,16 +52,21 @@ struct Biquad
     }
     void reset() { z1 = z2 = 0.0f; }
 
+    // Réponse complexe à la fréquence f
+    std::complex<float> response (float f, float fs) const
+    {
+        const float w = 2.0f * kPi * f / fs;
+        const std::complex<float> zi = std::polar (1.0f, -w);
+        const std::complex<float> z2c = zi * zi;
+        return (b0 + b1 * zi + b2 * z2c) / (1.0f + a1 * zi + a2 * z2c);
+    }
+
     // Retard de phase (en échantillons) à la fréquence f
     float phaseDelay (float f, float fs) const
     {
         const float w = 2.0f * kPi * f / fs;
         if (w < 1.0e-6f) return 0.0f;
-        const std::complex<float> zi = std::polar (1.0f, -w);
-        const std::complex<float> z2c = zi * zi;
-        const std::complex<float> num = b0 + b1 * zi + b2 * z2c;
-        const std::complex<float> den = 1.0f + a1 * zi + a2 * z2c;
-        return -std::arg (num / den) / w;
+        return -std::arg (response (f, fs)) / w;
     }
 };
 
@@ -141,7 +146,8 @@ struct ResonatorParams
     float bbd = 0.0f;          // 0..1 : caractère BBD (bande passante liée à la note + grain)
     float noise = 0.0f;        // 0..1 : souffle de la ligne BBD (filtré comme le reste)
     float cross = 0.0f;        // 0..1 : couplage avec l'autre canal
-    float freeze = 0.0f;       // > 0.5 : capture la sortie humide et la rejoue en boucle
+    float freeze = 0.0f;       // > 0.5 : fige le son (hold)
+    float holdLen = 0.5f;      // 0..1 : mémoire du hold, de 50 ms à 1 s (échelle exponentielle)
     float noiseGain = 1.0f;    // réglage interne : multiplicateur du souffle
     float jitterGain = 1.0f;   // réglage interne : multiplicateur du jitter d'horloge
 };
@@ -149,13 +155,20 @@ struct ResonatorParams
 // Résonateur : filtre en peigne à feedback positif, accordé par le temps de retard.
 // La sortie humide est prise à la SORTIE DE LA LIGNE BBD (après le souffle et les filtres de boucle) :
 // le BBD colore donc tout le signal humide, et le signal sec revient par Mix.
+//
+// Freeze (hold) : la sortie brute de la ligne est enregistrée en continu. Au gel, les N derniers
+// échantillons (N = 4 x un nombre entier de périodes) sont rejoués par QUATRE lecteurs décalés de N/4,
+// chacun fenêtré en Hann. La somme des fenêtres est constante : il n'y a ni point de bouclage
+// audible ni pulsation, et le son reste cohérent en hauteur. La vitesse de lecture suit la note
+// (Tune, LFO, Drift, Spread) : le son figé se joue comme un oscillateur. Il repasse par les filtres
+// de boucle et le BBD en direct.
 class Resonator
 {
 public:
     static constexpr float kMaxLoopGain = 1.02f;       // > 1 : auto-oscillation possible
     static constexpr float kMinFreqHz = 20.0f;
-    static constexpr float kFreezeSeconds = 0.30f;     // durée visée de la boucle capturée
-    static constexpr float kFreezeFadeSeconds = 0.02f; // fondu de raccord de la boucle
+    static constexpr float kHoldMinSeconds = 0.05f;    // mémoire du hold : holdLen = 0
+    static constexpr float kHoldMaxSeconds = 1.0f;     // mémoire du hold : holdLen = 1
 
     void prepare (float sampleRate, std::uint32_t seed = 1u)
     {
@@ -169,14 +182,15 @@ public:
         const float a = jitterLp.a;
         jitterNorm = std::sqrt (3.0f * (1.0f + a) / (1.0f - a));
 
-        // Enregistreur de la sortie humide et mémoire de la boucle gelée
-        const int need = (int) (fs * (kFreezeSeconds + kFreezeFadeSeconds)) + 64;
+        // Enregistreur de la sortie brute de la ligne et mémoire de la boucle gelée
+        const int cap = (int) (fs * (kHoldMaxSeconds + 0.2f));
         int n = 1;
-        while (n < need) n <<= 1;
+        while (n < cap) n <<= 1;
         rec.assign ((size_t) n, 0.0f);
         recMask = n - 1;
-        fzBuf.assign ((size_t) need, 0.0f);
-        fzSlew = 1.0f - std::exp (-1.0f / (0.015f * fs));
+        fzBuf.assign ((size_t) cap, 0.0f);
+        fzCap = cap;
+        fzSlew = 1.0f - std::exp (-1.0f / (0.03f * fs));
 
         update (ResonatorParams {});
         reset();
@@ -184,18 +198,21 @@ public:
     void reset()
     {
         delay.reset(); inLp.reset(); loop.reset(); dc.reset(); bw.reset(); jitterLp.reset(); lastLoop = 0.0f;
+        loopF.reset(); bwF.reset();
         std::fill (rec.begin(), rec.end(), 0.0f);
-        recW = 0; frozen = false; fzMix = 0.0f; fzPos = 0;
+        recW = 0; frozen = false; fzMix = 0.0f; fzLen = 0;
     }
 
     void update (const ResonatorParams& p)
     {
         const float fb = std::clamp (p.feedback, 0.0f, 1.0f);
         const float f0 = 440.0f * std::exp2 ((p.semitones - 69.0f) / 12.0f);
+        f0Now = f0;
         periodSamples = fs / f0;
         loopGain = fb * kMaxLoopGain;
         inGain = 1.0f - 0.8f * fb;
         loop.setCutoff (p.loopLpHz, fs);
+        loopF.a = loop.a;
         inLp.setLowpass (p.inputLpHz, fs);
 
         // Drive
@@ -208,13 +225,20 @@ public:
         // Caractère BBD : bande passante liée à l'horloge (donc à la note), bruit, jitter.
         // Une ligne de 2R étages bouclée sur une période 1/f0 échantillonne à R*f0 :
         // moins il y a d'étages (R petit), plus les graves sont sombres.
+        // Le filtre tourne TOUJOURS (état chaud, fréquence continue) et son dosage glisse de 0 à 1
+        // sur les premiers % du réglage : pas de clic au début de la course.
         const float bbdAmt = std::clamp (p.bbd, 0.0f, 1.0f);
         const float R = 770.0f * std::exp2 (-5.5f * bbdAmt);
-        const float bwHz = 0.2f * R * f0;
-        bwOn = bbdAmt > 0.001f && bwHz < 0.45f * fs;
+        const float bwHz = std::min (0.2f * R * f0, 0.45f * fs);
+        bwMix = std::clamp (bbdAmt * 20.0f, 0.0f, 1.0f);
+        bw.setLowpass (bwHz, fs);
+        bwF = bw; bwF.z1 = bwF.z2 = 0.0f;   // mêmes coefficients, état propre au chemin gelé
+        const float w = 2.0f * kPi * f0 / fs;
         float pd = loop.phaseDelay (f0, fs);
-        if (bwOn) { bw.setLowpass (bwHz, fs); pd += bw.phaseDelay (f0, fs); }
-        else      { bw.reset(); }
+        {
+            const std::complex<float> h = (1.0f - bwMix) + bwMix * bw.response (f0, fs);
+            pd += -std::arg (h) / w;
+        }
         const float nz = std::clamp (p.noise, 0.0f, 1.0f);
         noiseAmp = 0.0025f * nz * nz * p.noiseGain;      // souffle injecté dans la ligne BBD
         jitterAmt = 0.00025f * bbdAmt * p.jitterGain;    // grain d'horloge
@@ -223,7 +247,6 @@ public:
         crossAmt = std::clamp (p.cross, 0.0f, 1.0f);
         if (crossAmt > 0.0f)
         {
-            const float w = 2.0f * kPi * f0 / fs;
             const std::complex<float> m = std::complex<float> (1.0f - crossAmt, 0.0f) + crossAmt * std::polar (1.0f, -w);
             pd += -std::arg (m) / w;
         }
@@ -232,6 +255,7 @@ public:
         delaySamples = std::clamp (fs / f0 - pd, 2.0f, maxDelay);
 
         // Freeze : front montant = capture, front descendant = retour au signal direct
+        holdSeconds = kHoldMinSeconds * std::pow (kHoldMaxSeconds / kHoldMinSeconds, std::clamp (p.holdLen, 0.0f, 1.0f));
         const bool wantFrozen = p.freeze > 0.5f;
         if (wantFrozen && ! frozen) captureLoop();
         else if (! wantFrozen)      frozen = false;
@@ -255,20 +279,23 @@ public:
         float raw = delay.read (d);
         if (noiseAmp > 0.0f)
             raw += noiseAmp * nextNoise();
+        rec[(size_t) recW] = raw;                 // enregistrement continu pour Freeze
+        recW = (recW + 1) & recMask;
+
         float v = loop.process (raw);
-        if (bwOn) v = bw.process (v);
+        v += (bw.process (v) - v) * bwMix;
         lastLoop = v;
         const float vm = (1.0f - crossAmt) * v + crossAmt * crossV;
         const float y = in + std::tanh (loopGain * vm);  // saturation douce dans la boucle
         delay.push (y);
 
-        // Sortie humide = sortie de la ligne (v). On l'enregistre en continu pour Freeze.
-        rec[(size_t) recW] = v;
-        recW = (recW + 1) & recMask;
+        // Sortie humide = sortie de la ligne (v), ou le son figé qui repasse par les mêmes filtres
         float out = v;
         if (frozen || fzMix > 0.0f)
         {
-            out += (loopSample() - v) * fzMix;
+            float vf = loopF.process (readFrozen());
+            vf += (bwF.process (vf) - vf) * bwMix;
+            out += (vf - v) * fzMix;
             fzMix += ((frozen ? 1.0f : 0.0f) - fzMix) * fzSlew;
             if (! frozen && fzMix < 1.0e-4f) fzMix = 0.0f;
         }
@@ -277,33 +304,75 @@ public:
     float loopOut() const { return lastLoop; }
 
 private:
-    // Copie les derniers échantillons humides sur un nombre ENTIER de périodes du résonateur
-    // (l'accord est conservé), avec une zone de raccord pour boucler sans clic.
+    // Interpolation cubique (Hermite) sur la boucle gelée, vue comme un cercle de n échantillons
+    float frozenAt (float ph) const
+    {
+        const int n = fzLen;
+        const int i0 = (int) ph;
+        const float x = ph - (float) i0;
+        const float ym1 = fzBuf[(size_t) ((i0 - 1 + n) % n)], y0 = fzBuf[(size_t) i0];
+        const float y1 = fzBuf[(size_t) ((i0 + 1) % n)], y2 = fzBuf[(size_t) ((i0 + 2) % n)];
+        const float c1 = 0.5f * (y1 - ym1);
+        const float c2 = ym1 - 2.5f * y0 + 2.0f * y1 - 0.5f * y2;
+        const float c3 = 0.5f * (y2 - ym1) + 1.5f * (y0 - y1);
+        return ((c3 * x + c2) * x + c1) * x + y0;
+    }
+    float window (float ph) const
+    {
+        const float sn = std::sin (kPi * ph / (float) fzLen);
+        return sn * sn;   // Hann : quatre fenêtres décalées de N/4 totalisent exactement 2
+    }
+
+    // Quatre lecteurs décalés de N/4, vitesse proportionnelle à la hauteur actuelle
+    float readFrozen()
+    {
+        const float speed = std::clamp (f0Now / fzCapF0, 0.125f, 8.0f);
+        const float len = (float) fzLen;
+        float sum = 0.0f;
+        for (int k = 0; k < 4; ++k)
+        {
+            float ph = fzPhase[k];
+            sum += window (ph) * frozenAt (ph);
+            ph += speed;
+            while (ph >= len) ph -= len;
+            fzPhase[k] = ph;
+        }
+        return sum * 0.5f * fzGain;
+    }
+
+    // Copie les N derniers échantillons (N = 4 x un nombre entier de périodes : les lecteurs restent en phase)
     void captureLoop()
     {
         const float period = std::max (periodSamples, 2.0f);
-        const int maxLoop = (int) (fs * kFreezeSeconds);
-        const int k = std::max (1, (int) std::floor ((float) maxLoop / period));
-        const int len = std::clamp ((int) std::lround ((float) k * period), 32, maxLoop + 1);
-        const int fade = std::min ((int) (fs * kFreezeFadeSeconds), len / 2);
-        const int total = len + fade;
-        for (int n = 0; n < total; ++n)
-            fzBuf[(size_t) n] = rec[(size_t) ((recW - total + n) & recMask)];
-        fzLen = len; fzFade = fade; fzPos = 0;
-        frozen = true;
-    }
-    // Lecture de la boucle : dans la zone de raccord, on fond vers les échantillons qui PRÉCÈDENT le début
-    float loopSample()
-    {
-        const int j = fzPos;
-        float smp = fzBuf[(size_t) (fzFade + j)];
-        if (j >= fzLen - fzFade)
+        int m = std::max (1, (int) std::lround (holdSeconds * fs / (4.0f * period)));
+        int len = (int) std::lround (4.0f * (float) m * period);
+        while (len > fzCap && m > 1) { --m; len = (int) std::lround (4.0f * (float) m * period); }
+        len = std::clamp (len, 16, fzCap);
+        for (int n = 0; n < len; ++n)
+            fzBuf[(size_t) n] = rec[(size_t) ((recW - len + n) & recMask)];
+        fzLen = len;
+        fzCapF0 = f0Now;
+        for (int k = 0; k < 4; ++k) fzPhase[k] = (float) k * (float) len * 0.25f;
+        loopF.reset(); bwF.reset();
+
+        // Gain de niveau : le son figé garde le niveau du son capturé, qu'il soit cohérent ou non
+        // (la somme des quatre fenêtres vaut 2 en amplitude, mais seulement 1,22 en puissance
+        // pour un contenu non corrélé). Mesure sur un tour de boucle, un échantillon sur 8.
+        double pin = 0.0, pout = 0.0; int cnt = 0;
+        for (int n = 0; n < len; n += 8)
         {
-            const float w = (float) (j - (fzLen - fzFade) + 1) / (float) fzFade;
-            smp = smp * (1.0f - w) + fzBuf[(size_t) (j - (fzLen - fzFade))] * w;
+            double sum = 0.0;
+            for (int k = 0; k < 4; ++k)
+            {
+                const float ph = std::fmod ((float) n + (float) k * (float) len * 0.25f, (float) len);
+                sum += (double) window (ph) * (double) fzBuf[(size_t) std::min ((int) ph, len - 1)];
+            }
+            pout += 0.25 * sum * sum;
+            pin += (double) fzBuf[(size_t) n] * (double) fzBuf[(size_t) n];
+            ++cnt;
         }
-        fzPos = (j + 1 >= fzLen) ? 0 : j + 1;
-        return smp;
+        fzGain = (pout > 1.0e-20 && pin > 1.0e-20) ? std::clamp ((float) std::sqrt (pin / pout), 0.5f, 4.0f) : 1.0f;
+        frozen = true;
     }
 
     float shape (float x) const
@@ -321,22 +390,22 @@ private:
         return (float) (std::int32_t) rng * (1.0f / 2147483648.0f);
     }
 
-    float fs = 48000.0f, maxDelay = 1000.0f, delaySamples = 100.0f, periodSamples = 100.0f;
-    float loopGain = 0.0f, inGain = 1.0f, crossAmt = 0.0f, lastLoop = 0.0f;
+    float fs = 48000.0f, maxDelay = 1000.0f, delaySamples = 100.0f, periodSamples = 100.0f, f0Now = 130.0f;
+    float loopGain = 0.0f, inGain = 1.0f, crossAmt = 0.0f, lastLoop = 0.0f, bwMix = 0.0f;
     float driveGain = 1.0f, driveComp = 1.0f, driveMix = 0.0f;
     int curve = 0;
-    bool bwOn = false;
     float noiseAmp = 0.0f, jitterAmt = 0.0f, jitterNorm = 1.0f;
     std::uint32_t rng = 1u;
     DelayLine delay;
-    Biquad inLp, bw;
-    OnePole loop, jitterLp;
+    Biquad inLp, bw, bwF;
+    OnePole loop, loopF, jitterLp;
     DcBlocker dc;
 
     // Freeze
     std::vector<float> rec, fzBuf;
-    int recMask = 0, recW = 0, fzLen = 0, fzFade = 0, fzPos = 0;
+    int recMask = 0, recW = 0, fzLen = 0, fzCap = 0;
     bool frozen = false;
-    float fzMix = 0.0f, fzSlew = 0.001f;
+    float fzMix = 0.0f, fzSlew = 0.001f, fzGain = 1.0f, fzCapF0 = 130.0f, holdSeconds = 0.2f;
+    float fzPhase[4] = { 0.0f, 0.0f, 0.0f, 0.0f };
 };
 } // namespace bbdres
