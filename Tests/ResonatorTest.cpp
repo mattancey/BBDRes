@@ -4,18 +4,18 @@
 #include "../Source/Dsp/Modulation.h"
 #include <cstdio>
 #include <cstdlib>
- 
+
 using bbdres::Resonator;
 using bbdres::ResonatorParams;
- 
+
 static int failures = 0;
 static void check (bool ok, const char* what)
 {
     if (! ok) { std::printf ("ECHEC : %s\n", what); ++failures; }
 }
- 
+
 static float rnd() { return 2.0f * (float) std::rand() / (float) RAND_MAX - 1.0f; }
- 
+
 // Stabilité : bruit fort, silence, sinus, pour des réglages extrêmes
 static void testStability (float fs, bool full)
 {
@@ -26,7 +26,7 @@ static void testStability (float fs, bool full)
     const float bbds[] = { 0.0f, 0.5f, 1.0f };
     float worst = 0.0f;
     bool finite = true;
- 
+
     for (float fb : fbs) for (float n : notes) for (float a : lps) for (float b : lps)
     for (float dr : drives) for (int cv = 0; cv < 3; ++cv) for (float bb : bbds)
     {
@@ -50,7 +50,7 @@ static void testStability (float fs, bool full)
     check (finite, "valeur non finie (NaN/Inf)");
     check (worst < 8.0f, "sortie trop forte");
 }
- 
+
 // Position du pic de résonance du fondamental (balayage spectral fin), en cents par rapport à f0
 static float peakCents (const std::vector<float>& y, float fs, double f0)
 {
@@ -73,7 +73,7 @@ static float peakCents (const std::vector<float>& y, float fs, double f0)
     const double fMeasured = f0 * (0.97 + 0.06 * ((double) best + frac) / (double) steps);
     return (float) (1200.0 * std::log2 (fMeasured / f0));
 }
- 
+
 // Justesse d'un résonateur seul
 static float measureCents (float fs, float note, float bbd)
 {
@@ -87,7 +87,7 @@ static float measureCents (float fs, float note, float bbd)
     for (int i = 0; i < n; ++i) y[(size_t) i] = r.process (i == 0 ? 1.0f : 0.0f);
     return peakCents (y, fs, 440.0 * std::pow (2.0, ((double) note - 69.0) / 12.0));
 }
- 
+
 // Justesse du canal gauche d'une paire couplée (mêmes réglages des deux côtés)
 static float measureCentsCoupled (float fs, float note, float cross)
 {
@@ -106,7 +106,7 @@ static float measureCentsCoupled (float fs, float note, float cross)
     }
     return peakCents (y, fs, 440.0 * std::pow (2.0, ((double) note - 69.0) / 12.0));
 }
- 
+
 // Paire stéréo couplée, désaccordée, aux réglages extrêmes : doit rester bornée
 static void testCoupledStability (float fs)
 {
@@ -136,7 +136,7 @@ static void testCoupledStability (float fs)
     check (finite, "paire couplee : valeur non finie");
     check (worst < 8.0f, "paire couplee : sortie trop forte");
 }
- 
+
 // Freeze : la résonance doit se maintenir sans croître, entrée coupée
 static void testFreeze()
 {
@@ -161,7 +161,7 @@ static void testFreeze()
     check (late > 0.5f * early, "freeze : la resonance retombe trop vite");
     check (late < 1.5f * early, "freeze : la resonance croit");
 }
- 
+
 // Niveau RMS de la sortie pour une entrée silencieuse
 static float silentRms (float noise)
 {
@@ -172,7 +172,7 @@ static float silentRms (float noise)
     for (int i = 0; i < n; ++i) { const float y = r.process (0.0f); s += (double) y * y; }
     return (float) std::sqrt (s / n);
 }
- 
+
 // Bande passante : à BBD maximal, une note grave doit être plus sombre qu'à BBD nul
 static float highBandEnergy (float bbd)
 {
@@ -189,7 +189,7 @@ static float highBandEnergy (float bbd)
     }
     return (float) e;
 }
- 
+
 // Quantification : le résultat est dans la gamme et c'est bien la note la plus proche
 static void testQuantizer()
 {
@@ -218,7 +218,7 @@ static void testQuantizer()
     check (nearest, "quantification : ce n'est pas la note la plus proche");
     std::printf ("quantification : %d gammes x 12 toniques verifiees\n", bbdres::kNumScales);
 }
- 
+
 // LFO : bornes, formes, enveloppe
 static void testModulation()
 {
@@ -258,7 +258,7 @@ static void testModulation()
     check (std::fabs (bbdres::levelToUnit (0.1f) - 0.5f) < 1.0e-3f, "niveau -20 dB -> 0.5");
     check (bbdres::levelToUnit (0.001f) == 0.0f, "niveau -60 dB -> 0");
 }
- 
+
 int main()
 {
     testQuantizer();
@@ -276,7 +276,7 @@ int main()
             std::printf ("cross %.2f  note %.0f : ecart d'accord = %+.2f cents\n", cr, n, c);
             check (std::fabs (c) < 1.0f, "accord avec Cross hors tolerance (1 cent)");
         }
- 
+
     const float notes[] = { 36.0f, 48.0f, 60.0f, 72.0f, 84.0f };
     const float bbds[] = { 0.0f, 0.5f, 1.0f };
     for (float bb : bbds) for (float n : notes)
@@ -285,17 +285,16 @@ int main()
         std::printf ("bbd %.1f  note %.0f : ecart d'accord = %+.2f cents\n", bb, n, c);
         check (std::fabs (c) < 1.0f, "accord hors tolerance (1 cent)");
     }
- 
+
     const float rms0 = silentRms (0.0f), rms1 = silentRms (1.0f);
     std::printf ("silence (BBD 100 %%) : rms noise=0 -> %.6f ; noise=1 -> %.6f\n", rms0, rms1);
     check (rms0 == 0.0f, "souffle present alors que Noise = 0");
     check (rms1 > 0.0f && rms1 < 0.05f, "souffle Noise hors plage");
- 
+
     const float e0 = highBandEnergy (0.0f), e1 = highBandEnergy (1.0f);
     std::printf ("energie aigue, note 36 : bbd=0 -> %.3f ; bbd=1 -> %.3f\n", e0, e1);
     check (e1 < 0.5f * e0, "le BBD n'assombrit pas les graves");
- 
+
     std::printf (failures == 0 ? "TOUS LES TESTS PASSENT\n" : "%d ECHEC(S)\n", failures);
     return failures == 0 ? 0 : 1;
 }
- 
