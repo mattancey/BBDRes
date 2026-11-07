@@ -33,7 +33,7 @@ static void testStability (float fs, bool full)
         if (! full && (cv > 0 || bb == 0.5f || a != b)) continue;
         Resonator r; r.prepare (fs);
         ResonatorParams p; p.semitones = n; p.feedback = fb; p.inputLpHz = a; p.loopLpHz = b;
-        p.drive = dr; p.curve = cv; p.bbd = bb;
+        p.drive = dr; p.curve = cv; p.bbd = bb; p.noise = bb;
         r.update (p); r.reset();
         const int total = (int) (fs * 2.5f);
         for (int i = 0; i < total; ++i)
@@ -51,19 +51,10 @@ static void testStability (float fs, bool full)
     check (worst < 8.0f, "sortie trop forte");
 }
  
-// Justesse : position du pic de résonance du fondamental (balayage spectral fin de la réponse impulsionnelle)
-static float measureCents (float fs, float note, float bbd)
+// Position du pic de résonance du fondamental (balayage spectral fin), en cents par rapport à f0
+static float peakCents (const std::vector<float>& y, float fs, double f0)
 {
-    Resonator r; r.prepare (fs);
-    ResonatorParams p; p.semitones = note; p.feedback = 0.9f; p.inputLpHz = 20000.0f;
-    p.loopLpHz = 12000.0f; p.bbd = bbd;
-    p.noiseGain = 0.0f; p.jitterGain = 0.0f;   // on mesure l'accord, sans le souffle qui fausse la mesure
-    r.update (p); r.reset();
-    const int n = (int) (fs * 0.5f);
-    std::vector<float> y ((size_t) n);
-    for (int i = 0; i < n; ++i) y[(size_t) i] = r.process (i == 0 ? 1.0f : 0.0f);
- 
-    const double f0 = 440.0 * std::pow (2.0, ((double) note - 69.0) / 12.0);
+    const int n = (int) y.size();
     const int steps = 600;
     std::vector<double> mag ((size_t) steps + 1);
     int best = 0;
@@ -83,11 +74,99 @@ static float measureCents (float fs, float note, float bbd)
     return (float) (1200.0 * std::log2 (fMeasured / f0));
 }
  
+// Justesse d'un résonateur seul
+static float measureCents (float fs, float note, float bbd)
+{
+    Resonator r; r.prepare (fs);
+    ResonatorParams p; p.semitones = note; p.feedback = 0.9f; p.inputLpHz = 20000.0f;
+    p.loopLpHz = 12000.0f; p.bbd = bbd;
+    p.noiseGain = 0.0f; p.jitterGain = 0.0f;   // on mesure l'accord, sans le souffle qui fausse la mesure
+    r.update (p); r.reset();
+    const int n = (int) (fs * 0.5f);
+    std::vector<float> y ((size_t) n);
+    for (int i = 0; i < n; ++i) y[(size_t) i] = r.process (i == 0 ? 1.0f : 0.0f);
+    return peakCents (y, fs, 440.0 * std::pow (2.0, ((double) note - 69.0) / 12.0));
+}
+ 
+// Justesse du canal gauche d'une paire couplée (mêmes réglages des deux côtés)
+static float measureCentsCoupled (float fs, float note, float cross)
+{
+    Resonator a, b; a.prepare (fs, 1u); b.prepare (fs, 2u);
+    ResonatorParams p; p.semitones = note; p.feedback = 0.9f; p.inputLpHz = 20000.0f;
+    p.loopLpHz = 12000.0f; p.cross = cross; p.noiseGain = 0.0f; p.jitterGain = 0.0f;
+    a.update (p); b.update (p); a.reset(); b.reset();
+    const int n = (int) (fs * 0.5f);
+    std::vector<float> y ((size_t) n);
+    for (int i = 0; i < n; ++i)
+    {
+        const float va = a.loopOut(), vb = b.loopOut();
+        const float x = i == 0 ? 1.0f : 0.0f;
+        y[(size_t) i] = a.process (x, vb);
+        b.process (x, va);
+    }
+    return peakCents (y, fs, 440.0 * std::pow (2.0, ((double) note - 69.0) / 12.0));
+}
+ 
+// Paire stéréo couplée, désaccordée, aux réglages extrêmes : doit rester bornée
+static void testCoupledStability (float fs)
+{
+    float worst = 0.0f; bool finite = true;
+    const float crosses[] = { 0.0f, 0.5f, 1.0f };
+    const float notes[] = { 30.0f, 60.0f, 90.0f };
+    for (float cr : crosses) for (float n : notes) for (float fb : { 0.9f, 1.0f })
+    for (float fz : { 0.0f, 1.0f })
+    {
+        Resonator a, b; a.prepare (fs, 1u); b.prepare (fs, 2u);
+        ResonatorParams p; p.feedback = fb; p.cross = cr; p.drive = 1.0f; p.bbd = 1.0f; p.noise = 1.0f;
+        p.semitones = n - 0.25f; a.update (p);
+        p.semitones = n + 0.25f; b.update (p);
+        a.reset(); b.reset();
+        const int total = (int) (fs * 3.0f);
+        for (int i = 0; i < total; ++i)
+        {
+            if (i == (int) (fs * 1.5f)) { p.freeze = fz; p.semitones = n - 0.25f; a.update (p); p.semitones = n + 0.25f; b.update (p); }
+            const float x = i < (int) (fs * 1.0f) ? rnd() : 0.0f;
+            const float va = a.loopOut(), vb = b.loopOut();
+            const float ya = a.process (x, vb), yb = b.process (x, va);
+            if (! std::isfinite (ya) || ! std::isfinite (yb)) finite = false;
+            worst = std::max (worst, std::max (std::fabs (ya), std::fabs (yb)));
+        }
+    }
+    std::printf ("fs=%.0f  paire couplee : crete maximale = %.2f\n", fs, worst);
+    check (finite, "paire couplee : valeur non finie");
+    check (worst < 8.0f, "paire couplee : sortie trop forte");
+}
+ 
+// Freeze : la résonance doit se maintenir sans croître, entrée coupée
+static void testFreeze()
+{
+    const float fs = 48000.0f;
+    Resonator r; r.prepare (fs);
+    ResonatorParams p; p.semitones = 48.0f; p.feedback = 0.5f; p.inputLpHz = 20000.0f; p.loopLpHz = 20000.0f;
+    r.update (p); r.reset();
+    for (int i = 0; i < (int) (fs * 0.3f); ++i) r.process (0.5f * rnd());
+    p.freeze = 1.0f; r.update (p);
+    auto rms = [&] (float seconds)
+    {
+        double s = 0.0; const int n = (int) (fs * seconds);
+        for (int i = 0; i < n; ++i) { const float y = r.process (0.5f * rnd()); s += (double) y * y; }
+        return (float) std::sqrt (s / n);
+    };
+    rms (0.2f);
+    const float early = rms (0.2f);
+    rms (3.0f);
+    const float late = rms (0.2f);
+    std::printf ("freeze : niveau a 0.4 s = %.4f ; a 3.6 s = %.4f\n", early, late);
+    check (early > 0.001f, "freeze : rien a figer");
+    check (late > 0.5f * early, "freeze : la resonance retombe trop vite");
+    check (late < 1.5f * early, "freeze : la resonance croit");
+}
+ 
 // Niveau RMS de la sortie pour une entrée silencieuse
-static float silentRms (float bbd)
+static float silentRms (float noise)
 {
     Resonator r; r.prepare (48000.0f);
-    ResonatorParams p; p.feedback = 0.9f; p.bbd = bbd;
+    ResonatorParams p; p.feedback = 0.9f; p.bbd = 1.0f; p.noise = noise;
     r.update (p); r.reset();
     double s = 0.0; const int n = 48000;
     for (int i = 0; i < n; ++i) { const float y = r.process (0.0f); s += (double) y * y; }
@@ -157,6 +236,19 @@ static void testModulation()
         std::printf ("LFO forme %d : min %.3f max %.3f\n", shape, lo, hi);
         if (shape == 0) check (lo < -0.99f && hi > 0.99f, "sinus : amplitude incomplete");
     }
+    // Synchronisation : phase imposée par la position de l'hôte
+    check (std::fabs (bbdres::syncedPhase (4.0, 4.0f)) < 1.0e-6f, "sync : debut de mesure");
+    check (std::fabs (bbdres::syncedPhase (5.0, 4.0f) - 0.25f) < 1.0e-6f, "sync : un quart de mesure");
+    check (bbdres::syncedPhase (-1.0, 4.0f) >= 0.0f && bbdres::syncedPhase (-1.0, 4.0f) < 1.0f, "sync : position negative");
+    {
+        bbdres::Lfo l; l.prepare (3000.0f, 5u);
+        const float a = l.nextAt (0, 0.25f);    // sinus a un quart de cycle = 1
+        const float b = l.nextAt (0, 0.75f);    // trois quarts = -1
+        check (std::fabs (a - 1.0f) < 1.0e-4f && std::fabs (b + 1.0f) < 1.0e-4f, "sync : forme sinus calee");
+        const float r1 = l.nextAt (4, 0.9f), r2 = l.nextAt (4, 0.95f), r3 = l.nextAt (4, 0.05f);
+        check (r1 == r2 && r3 != r2, "sync : le Random change au bouclage");
+    }
+    check (bbdres::kNumSync == 12 && bbdres::kSyncBeats[5] == 1.0f && bbdres::kSyncBeats[3] == 4.0f, "table de sync");
     bbdres::EnvFollower e; e.prepare (3000.0f);
     for (int i = 0; i < 90; ++i) e.next (1.0f);   // 30 ms
     check (e.y > 0.9f, "enveloppe : attaque trop lente");
@@ -174,6 +266,16 @@ int main()
     testStability (44100.0f, true);
     testStability (48000.0f, false);
     testStability (192000.0f, false);
+    testCoupledStability (44100.0f);
+    testCoupledStability (96000.0f);
+    testFreeze();
+    for (float cr : { 0.25f, 0.5f, 1.0f })
+        for (float n : { 36.0f, 60.0f, 84.0f })
+        {
+            const float c = measureCentsCoupled (48000.0f, n, cr);
+            std::printf ("cross %.2f  note %.0f : ecart d'accord = %+.2f cents\n", cr, n, c);
+            check (std::fabs (c) < 1.0f, "accord avec Cross hors tolerance (1 cent)");
+        }
  
     const float notes[] = { 36.0f, 48.0f, 60.0f, 72.0f, 84.0f };
     const float bbds[] = { 0.0f, 0.5f, 1.0f };
@@ -185,9 +287,9 @@ int main()
     }
  
     const float rms0 = silentRms (0.0f), rms1 = silentRms (1.0f);
-    std::printf ("silence : rms bbd=0 -> %.6f ; bbd=1 -> %.6f\n", rms0, rms1);
-    check (rms0 == 0.0f, "bruit present alors que BBD = 0");
-    check (rms1 > 0.0f && rms1 < 0.1f, "bruit BBD hors plage");
+    std::printf ("silence (BBD 100 %%) : rms noise=0 -> %.6f ; noise=1 -> %.6f\n", rms0, rms1);
+    check (rms0 == 0.0f, "souffle present alors que Noise = 0");
+    check (rms1 > 0.0f && rms1 < 0.05f, "souffle Noise hors plage");
  
     const float e0 = highBandEnergy (0.0f), e1 = highBandEnergy (1.0f);
     std::printf ("energie aigue, note 36 : bbd=0 -> %.3f ; bbd=1 -> %.3f\n", e0, e1);
@@ -196,3 +298,4 @@ int main()
     std::printf (failures == 0 ? "TOUS LES TESTS PASSENT\n" : "%d ECHEC(S)\n", failures);
     return failures == 0 ? 0 : 1;
 }
+ 
