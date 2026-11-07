@@ -37,6 +37,6 @@ jobs:
       - name: Publier le résultat
         uses: actions/upload-artifact@v6
         with:
-          name: BBDRes-macOS
+          name: BBDResV2-macOS
           path: plugin.zip
  
