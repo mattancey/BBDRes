@@ -12,20 +12,25 @@ BBDResAudioProcessor::BBDResAudioProcessor()
     feedbackP  = apvts.getRawParameterValue (ParamIDs::feedback);
     inputLpP   = apvts.getRawParameterValue (ParamIDs::inputLP);
     loopLpP    = apvts.getRawParameterValue (ParamIDs::loopLP);
+    loopDynP   = apvts.getRawParameterValue (ParamIDs::loopDyn);
     mixP       = apvts.getRawParameterValue (ParamIDs::mix);
     levelP     = apvts.getRawParameterValue (ParamIDs::outLevel);
     driveP     = apvts.getRawParameterValue (ParamIDs::drive);
     curveP     = apvts.getRawParameterValue (ParamIDs::driveCurve);
     bbdP       = apvts.getRawParameterValue (ParamIDs::bbd);
+    noiseP     = apvts.getRawParameterValue (ParamIDs::noise);
+    freezeP    = apvts.getRawParameterValue (ParamIDs::freeze);
     rootP      = apvts.getRawParameterValue (ParamIDs::root);
     scaleP     = apvts.getRawParameterValue (ParamIDs::scale);
     quantizeP  = apvts.getRawParameterValue (ParamIDs::quantize);
     lfoShapeP  = apvts.getRawParameterValue (ParamIDs::lfoShape);
+    lfoSyncP   = apvts.getRawParameterValue (ParamIDs::lfoSync);
     lfoRateP   = apvts.getRawParameterValue (ParamIDs::lfoRate);
     lfoDepthP  = apvts.getRawParameterValue (ParamIDs::lfoDepth);
     lfoTargetP = apvts.getRawParameterValue (ParamIDs::lfoTarget);
-    dynamicsP  = apvts.getRawParameterValue (ParamIDs::dynamics);
     driftP     = apvts.getRawParameterValue (ParamIDs::drift);
+    spreadP    = apvts.getRawParameterValue (ParamIDs::spread);
+    crossP     = apvts.getRawParameterValue (ParamIDs::cross);
 }
  
 juce::AudioProcessorValueTreeState::ParameterLayout BBDResAudioProcessor::createLayout()
@@ -53,9 +58,13 @@ juce::AudioProcessorValueTreeState::ParameterLayout BBDResAudioProcessor::create
     for (const auto& sc : bbdres::kScales)
         scaleNames.add (sc.name);
  
+    juce::StringArray syncNames;
+    for (const auto* nm : bbdres::kSyncNames)
+        syncNames.add (nm);
+ 
     juce::AudioProcessorValueTreeState::ParameterLayout layout;
  
-    // Input
+    // --- Input ---
     layout.add (std::make_unique<juce::AudioParameterFloat> (
         juce::ParameterID { ParamIDs::drive, 1 }, "Drive",
         Range (0.0f, 1.0f, 0.001f), 0.0f, Attr().withStringFromValueFunction (percent)));
@@ -68,7 +77,7 @@ juce::AudioProcessorValueTreeState::ParameterLayout BBDResAudioProcessor::create
         juce::ParameterID { ParamIDs::inputLP, 1 }, "Input LP 12dB",
         Range (200.0f, 20000.0f, 0.0f, 0.3f), 8000.0f, Attr().withStringFromValueFunction (hz)));
  
-    // Resonator
+    // --- Resonator (Loop Dyn est volontairement juste après Loop LP) ---
     layout.add (std::make_unique<juce::AudioParameterFloat> (
         juce::ParameterID { ParamIDs::tune, 1 }, "Tune",
         Range (24.0f, 96.0f, 1.0f), 48.0f, Attr().withStringFromValueFunction (note)));
@@ -86,10 +95,21 @@ juce::AudioProcessorValueTreeState::ParameterLayout BBDResAudioProcessor::create
         Range (200.0f, 20000.0f, 0.0f, 0.3f), 6000.0f, Attr().withStringFromValueFunction (hz)));
  
     layout.add (std::make_unique<juce::AudioParameterFloat> (
+        juce::ParameterID { ParamIDs::loopDyn, 1 }, "Loop Dyn",
+        Range (-1.0f, 1.0f, 0.001f), 0.0f, Attr().withStringFromValueFunction (percent)));
+ 
+    layout.add (std::make_unique<juce::AudioParameterFloat> (
         juce::ParameterID { ParamIDs::bbd, 1 }, "BBD",
         Range (0.0f, 1.0f, 0.001f), 0.3f, Attr().withStringFromValueFunction (percent)));
  
-    // Pitch
+    layout.add (std::make_unique<juce::AudioParameterFloat> (
+        juce::ParameterID { ParamIDs::noise, 1 }, "Noise",
+        Range (0.0f, 1.0f, 0.001f), 0.0f, Attr().withStringFromValueFunction (percent)));
+ 
+    layout.add (std::make_unique<juce::AudioParameterBool> (
+        juce::ParameterID { ParamIDs::freeze, 1 }, "Freeze", false));
+ 
+    // --- Pitch ---
     layout.add (std::make_unique<juce::AudioParameterChoice> (
         juce::ParameterID { ParamIDs::root, 1 }, "Root",
         juce::StringArray { "C", "C#", "D", "D#", "E", "F", "F#", "G", "G#", "A", "A#", "B" }, 0));
@@ -100,10 +120,13 @@ juce::AudioProcessorValueTreeState::ParameterLayout BBDResAudioProcessor::create
     layout.add (std::make_unique<juce::AudioParameterBool> (
         juce::ParameterID { ParamIDs::quantize, 1 }, "Quantize", false));
  
-    // Mod
+    // --- Mod ---
     layout.add (std::make_unique<juce::AudioParameterChoice> (
         juce::ParameterID { ParamIDs::lfoShape, 1 }, "LFO Shape",
         juce::StringArray { "Sine", "Triangle", "Square", "Ramp", "Random", "Smooth Random" }, 0));
+ 
+    layout.add (std::make_unique<juce::AudioParameterChoice> (
+        juce::ParameterID { ParamIDs::lfoSync, 1 }, "LFO Sync", syncNames, 0));
  
     layout.add (std::make_unique<juce::AudioParameterFloat> (
         juce::ParameterID { ParamIDs::lfoRate, 1 }, "LFO Rate",
@@ -118,14 +141,19 @@ juce::AudioProcessorValueTreeState::ParameterLayout BBDResAudioProcessor::create
         juce::StringArray { "Tune", "Feedback", "Filter" }, 0));
  
     layout.add (std::make_unique<juce::AudioParameterFloat> (
-        juce::ParameterID { ParamIDs::dynamics, 1 }, "Dynamics",
-        Range (-1.0f, 1.0f, 0.001f), 0.0f, Attr().withStringFromValueFunction (percent)));
- 
-    layout.add (std::make_unique<juce::AudioParameterFloat> (
         juce::ParameterID { ParamIDs::drift, 1 }, "Drift",
         Range (0.0f, 1.0f, 0.001f), 0.0f, Attr().withStringFromValueFunction (percent)));
  
-    // Sortie
+    // --- Stereo ---
+    layout.add (std::make_unique<juce::AudioParameterFloat> (
+        juce::ParameterID { ParamIDs::spread, 1 }, "Spread",
+        Range (0.0f, 1.0f, 0.001f), 0.0f, Attr().withStringFromValueFunction (percent)));
+ 
+    layout.add (std::make_unique<juce::AudioParameterFloat> (
+        juce::ParameterID { ParamIDs::cross, 1 }, "Cross",
+        Range (0.0f, 1.0f, 0.001f), 0.0f, Attr().withStringFromValueFunction (percent)));
+ 
+    // --- Sortie ---
     layout.add (std::make_unique<juce::AudioParameterFloat> (
         juce::ParameterID { ParamIDs::mix, 1 }, "Mix",
         Range (0.0f, 1.0f, 0.001f), 0.5f, Attr().withStringFromValueFunction (percent)));
@@ -149,21 +177,27 @@ BBDResAudioProcessor::Targets BBDResAudioProcessor::readTargets() const
     t.level     = juce::Decibels::decibelsToGain (levelP->load());
     t.drive     = driveP->load();
     t.bbd       = bbdP->load();
+    t.noise     = noiseP->load();
     t.lfoRate   = lfoRateP->load();
     t.lfoDepth  = lfoDepthP->load();
-    t.dynamics  = dynamicsP->load();
+    t.loopDyn   = loopDynP->load();
     t.drift     = driftP->load();
+    t.spread    = spreadP->load();
+    t.cross     = crossP->load();
     t.curve     = juce::roundToInt (curveP->load());
     t.root      = juce::jlimit (0, 11, juce::roundToInt (rootP->load()));
     t.scale     = juce::jlimit (0, bbdres::kNumScales - 1, juce::roundToInt (scaleP->load()));
     t.lfoShape  = juce::roundToInt (lfoShapeP->load());
     t.lfoTarget = juce::roundToInt (lfoTargetP->load());
+    t.lfoSync   = juce::jlimit (0, bbdres::kNumSync - 1, juce::roundToInt (lfoSyncP->load()));
     t.quantize  = quantizeP->load() > 0.5f;
+    t.freeze    = freezeP->load() > 0.5f;
     return t;
 }
  
 void BBDResAudioProcessor::prepareToPlay (double sampleRate, int)
 {
+    currentSampleRate = sampleRate;
     const float fs = (float) sampleRate;
     const float controlRate = fs / (float) kControlBlock;
  
@@ -178,12 +212,17 @@ void BBDResAudioProcessor::prepareToPlay (double sampleRate, int)
     levelSm.prepare (controlRate, 0.02f);
     driveSm.prepare (controlRate, 0.02f);
     bbdSm.prepare (controlRate, 0.05f);
+    noiseSm.prepare (controlRate, 0.05f);
+    spreadSm.prepare (controlRate, 0.05f);
+    crossSm.prepare (controlRate, 0.05f);
+    freezeSm.prepare (controlRate, 0.05f);
  
     lfo.prepare (controlRate, 11u);
-    driftTuneLfo.prepare (controlRate, 23u);
-    driftFilterLfo.prepare (controlRate, 37u);
-    driftTuneLfo.setRateHz (0.23f);
-    driftFilterLfo.setRateHz (0.37f);
+    // Dérives indépendantes à gauche et à droite (rythmes différents pour ne pas rester synchrones)
+    driftTuneLfo[0].prepare (controlRate, 23u);   driftTuneLfo[0].setRateHz (0.37f);
+    driftTuneLfo[1].prepare (controlRate, 29u);   driftTuneLfo[1].setRateHz (0.43f);
+    driftFilterLfo[0].prepare (controlRate, 37u); driftFilterLfo[0].setRateHz (0.51f);
+    driftFilterLfo[1].prepare (controlRate, 41u); driftFilterLfo[1].setRateHz (0.61f);
     env.prepare (controlRate);
  
     const auto t = readTargets();
@@ -195,6 +234,10 @@ void BBDResAudioProcessor::prepareToPlay (double sampleRate, int)
     levelSm.snap (t.level);
     driveSm.snap (t.drive);
     bbdSm.snap (t.bbd);
+    noiseSm.snap (t.noise);
+    spreadSm.snap (t.spread);
+    crossSm.snap (t.cross);
+    freezeSm.snap (t.freeze ? 1.0f : 0.0f);
     mixPrev = t.mix;
     levelPrev = t.level;
 }
@@ -222,6 +265,25 @@ void BBDResAudioProcessor::processBlock (juce::AudioBuffer<float>& buffer, juce:
     float* data[2] = { buffer.getWritePointer (0), numCh > 1 ? buffer.getWritePointer (1) : nullptr };
     const auto t = readTargets();
  
+    // --- Tempo et position de l'hôte (pour la synchronisation du LFO) ---
+    double bpm = 120.0, ppqStart = 0.0;
+    bool transportLocked = false;
+    if (auto* playHead = getPlayHead())
+    {
+        if (auto pos = playHead->getPosition())
+        {
+            if (auto b = pos->getBpm())
+                if (*b > 1.0) bpm = *b;
+            if (pos->getIsPlaying())
+                if (auto p = pos->getPpqPosition())
+                {
+                    ppqStart = *p;
+                    transportLocked = true;
+                }
+        }
+    }
+    const float beatsPerCycle = bbdres::kSyncBeats[t.lfoSync];
+ 
     constexpr float kMinLoopLog2 = 6.64385619f;   // log2 (100 Hz)
     constexpr float kMaxLoopLog2 = 14.2877124f;   // log2 (20000 Hz)
  
@@ -236,40 +298,72 @@ void BBDResAudioProcessor::processBlock (juce::AudioBuffer<float>& buffer, juce:
                 acc += std::abs (data[c][start + i]);
         const float envUnit = bbdres::levelToUnit (env.next (acc / (float) (len * numCh)));
  
-        lfo.setRateHz (t.lfoRate);
-        const float lfoV = lfo.next (t.lfoShape) * t.lfoDepth;
+        float lfoRaw;
+        if (t.lfoSync == 0)
+        {
+            lfo.setRateHz (t.lfoRate);
+            lfoRaw = lfo.next (t.lfoShape);
+        }
+        else if (transportLocked)
+        {
+            const double ppq = ppqStart + (double) start * bpm / (60.0 * currentSampleRate);
+            lfoRaw = lfo.nextAt (t.lfoShape, bbdres::syncedPhase (ppq, beatsPerCycle));
+        }
+        else
+        {
+            lfo.setRateHz ((float) (bpm / 60.0 / (double) beatsPerCycle));
+            lfoRaw = lfo.next (t.lfoShape);
+        }
+        const float lfoV = lfoRaw * t.lfoDepth;
+ 
         float lfoSemis = 0.0f, lfoFb = 0.0f, lfoOct = 0.0f;
         if (t.lfoTarget == 0)      lfoSemis = lfoV * 12.0f;   // +/- 12 demi-tons
         else if (t.lfoTarget == 1) lfoFb    = lfoV * 0.3f;    // +/- 30 % de feedback
         else                       lfoOct   = lfoV * 3.0f;    // +/- 3 octaves de filtre
  
-        const float dynOct     = t.dynamics * envUnit * 3.0f;                  // Dynamics -> filtre
-        const float driftSemis = driftTuneLfo.next (5) * t.drift * 0.3f;       // +/- 30 cents
-        const float driftOct   = driftFilterLfo.next (5) * t.drift * 0.5f;     // +/- 0,5 octave
+        const float dynOct = t.loopDyn * envUnit * 3.0f;      // Loop Dyn : l'entrée pilote le filtre de boucle
+        float driftSemis[2], driftOct[2];                      // dérive indépendante par canal
+        for (int c = 0; c < 2; ++c)
+        {
+            driftSemis[c] = driftTuneLfo[c].next (5) * t.drift * 0.4f;    // jusqu'à +/- 40 cents
+            driftOct[c]   = driftFilterLfo[c].next (5) * t.drift * 0.5f;  // jusqu'à +/- 0,5 octave
+        }
  
-        // --- Hauteur : LFO, puis quantification sur la gamme, puis accord fin et dérive ---
+        // --- Hauteur : LFO, puis quantification sur la gamme, puis accord fin ---
         float base = t.tune + lfoSemis;
         if (t.quantize)
             base = bbdres::quantizeToScale (base, t.root, bbdres::kScales[t.scale].mask);
-        const float semisTarget = juce::jlimit (18.0f, 114.0f, base + t.fine * 0.01f + driftSemis);
+        const float semisTarget = base + t.fine * 0.01f;
  
         const float fbTarget = juce::jlimit (0.0f, 1.0f, t.feedback + lfoFb);
-        const float loopTarget = juce::jlimit (kMinLoopLog2, kMaxLoopLog2, t.loopLog2 + lfoOct + dynOct + driftOct);
+        const float loopTarget = juce::jlimit (kMinLoopLog2, kMaxLoopLog2, t.loopLog2 + lfoOct + dynOct);
  
-        // --- Lissage et mise à jour des résonateurs ---
+        // --- Lissage ---
+        const float semisSm = tuneSm.next (juce::jlimit (18.0f, 114.0f, semisTarget));
+        const float loopSmV = loopSm.next (loopTarget);
+        const float spreadSemis = spreadSm.next (t.spread) * 0.5f;   // désaccord total : jusqu'à 50 cents
+        const float spreadHalf = numCh > 1 ? spreadSemis * 0.5f : 0.0f;
+ 
         bbdres::ResonatorParams rp;
-        rp.semitones = tuneSm.next (semisTarget);
         rp.feedback  = fbSm.next (fbTarget);
         rp.inputLpHz = std::exp2 (inSm.next (t.inLog2));
-        rp.loopLpHz  = std::exp2 (loopSm.next (loopTarget));
         rp.drive     = driveSm.next (t.drive);
         rp.curve     = t.curve;
         rp.bbd       = bbdSm.next (t.bbd);
+        rp.noise     = noiseSm.next (t.noise);
+        rp.freeze    = freezeSm.next (t.freeze ? 1.0f : 0.0f);
+        const float crossAmt = crossSm.next (t.cross);
+        rp.cross     = numCh > 1 ? crossAmt : 0.0f;
         const float mixNew = mixSm.next (t.mix);
         const float lvlNew = levelSm.next (t.level);
  
         for (int c = 0; c < numCh; ++c)
-            resonators[c].update (rp);
+        {
+            bbdres::ResonatorParams rc = rp;
+            rc.semitones = juce::jlimit (12.0f, 120.0f, semisSm + (c == 0 ? -spreadHalf : spreadHalf) + driftSemis[c]);
+            rc.loopLpHz  = std::exp2 (juce::jlimit (kMinLoopLog2, kMaxLoopLog2, loopSmV + driftOct[c]));
+            resonators[c].update (rc);
+        }
  
         for (int i = 0; i < len; ++i)
         {
@@ -277,11 +371,14 @@ void BBDResAudioProcessor::processBlock (juce::AudioBuffer<float>& buffer, juce:
             const float m = mixPrev + (mixNew - mixPrev) * k;
             const float l = levelPrev + (lvlNew - levelPrev) * k;
  
+            // Sorties de boucle de l'échantillon précédent, pour le couplage entre canaux
+            const float crossIn[2] = { resonators[1].loopOut(), resonators[0].loopOut() };
+ 
             for (int c = 0; c < numCh; ++c)
             {
                 float& s = data[c][start + i];
                 const float dry = s;
-                const float wet = resonators[c].process (dry);
+                const float wet = resonators[c].process (dry, crossIn[c]);
                 s = (dry + (wet - dry) * m) * l;
             }
         }
