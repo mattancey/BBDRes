@@ -139,7 +139,10 @@ struct ResonatorParams
     float drive = 0.0f;        // 0..1
     int curve = 0;             // 0 = Soft, 1 = Asym, 2 = Fold
     float bbd = 0.0f;          // 0..1 : caractère BBD
-    float noiseGain = 1.0f;    // réglage interne : multiplicateur du souffle BBD
+    float noise = 0.0f;        // 0..1 : souffle (accordé par le résonateur), indépendant du BBD
+    float cross = 0.0f;        // 0..1 : couplage avec l'autre canal
+    float freeze = 0.0f;       // 0..1 : fige la résonance (1 = gelé)
+    float noiseGain = 1.0f;    // réglage interne : multiplicateur du souffle
     float jitterGain = 1.0f;   // réglage interne : multiplicateur du jitter d'horloge
 };
  
@@ -149,6 +152,7 @@ class Resonator
 public:
     static constexpr float kMaxLoopGain = 1.02f;  // > 1 : auto-oscillation possible
     static constexpr float kMinFreqHz = 20.0f;
+    static constexpr float kFreezeGain = 1.004f;  // gain de boucle quand la résonance est gelée
  
     void prepare (float sampleRate, std::uint32_t seed = 1u)
     {
@@ -166,15 +170,16 @@ public:
     }
     void reset()
     {
-        delay.reset(); inLp.reset(); loop.reset(); dc.reset(); bw.reset(); jitterLp.reset();
+        delay.reset(); inLp.reset(); loop.reset(); dc.reset(); bw.reset(); jitterLp.reset(); lastLoop = 0.0f;
     }
  
     void update (const ResonatorParams& p)
     {
         const float fb = std::clamp (p.feedback, 0.0f, 1.0f);
         const float f0 = 440.0f * std::exp2 ((p.semitones - 69.0f) / 12.0f);
-        loopGain = fb * kMaxLoopGain;
-        inGain = 1.0f - 0.8f * fb;
+        const float fr = std::clamp (p.freeze, 0.0f, 1.0f);
+        loopGain = fb * kMaxLoopGain * (1.0f - fr) + kFreezeGain * fr;   // gelé : la boucle compense ses pertes
+        inGain = (1.0f - 0.8f * fb) * (1.0f - fr);               // gelé : l'entrée est coupée
         loop.setCutoff (p.loopLpHz, fs);
         inLp.setLowpass (p.inputLpHz, fs);
  
@@ -195,14 +200,25 @@ public:
         float pd = loop.phaseDelay (f0, fs);
         if (bwOn) { bw.setLowpass (bwHz, fs); pd += bw.phaseDelay (f0, fs); }
         else      { bw.reset(); }
-        noiseAmp = 0.00104f * bbdAmt * bbdAmt * p.noiseGain;   // souffle : -35 % par rapport à l'étape 3
-        jitterAmt = 0.0005f * bbdAmt * p.jitterGain;            // grain d'horloge, plus audible qu'avant
+        const float nz = std::clamp (p.noise, 0.0f, 1.0f);
+        noiseAmp = 0.0025f * nz * nz * p.noiseGain * (1.0f - fr);   // souffle indépendant du BBD
+        jitterAmt = 0.00025f * bbdAmt * p.jitterGain;                // grain d'horloge (moitié moins qu'avant)
+ 
+        // Couplage entre canaux : le chemin croisé a un échantillon de retard en plus, on le compense
+        crossAmt = std::clamp (p.cross, 0.0f, 1.0f);
+        if (crossAmt > 0.0f)
+        {
+            const float w = 2.0f * kPi * f0 / fs;
+            const std::complex<float> m = std::complex<float> (1.0f - crossAmt, 0.0f) + crossAmt * std::polar (1.0f, -w);
+            pd += -std::arg (m) / w;
+        }
  
         // Les filtres de la boucle retardent la phase : on les compense pour rester juste
         delaySamples = std::clamp (fs / f0 - pd, 2.0f, maxDelay);
     }
  
-    float process (float x)
+    // crossV : sortie de boucle de l'autre canal (ignorée si cross = 0)
+    float process (float x, float crossV = 0.0f)
     {
         // Drive (courbe choisie), puis filtre d'entrée, blocage du continu et gain
         float s = x;
@@ -219,10 +235,13 @@ public:
  
         float v = loop.process (delay.read (d));
         if (bwOn) v = bw.process (v);
-        const float y = in + std::tanh (loopGain * v);  // saturation douce dans la boucle
+        lastLoop = v;
+        const float vm = (1.0f - crossAmt) * v + crossAmt * crossV;
+        const float y = in + std::tanh (loopGain * vm);  // saturation douce dans la boucle
         delay.push (y);
         return y;
     }
+    float loopOut() const { return lastLoop; }
  
 private:
     float shape (float x) const
@@ -241,7 +260,7 @@ private:
     }
  
     float fs = 48000.0f, maxDelay = 1000.0f, delaySamples = 100.0f;
-    float loopGain = 0.0f, inGain = 1.0f;
+    float loopGain = 0.0f, inGain = 1.0f, crossAmt = 0.0f, lastLoop = 0.0f;
     float driveGain = 1.0f, driveComp = 1.0f, driveMix = 0.0f;
     int curve = 0;
     bool bwOn = false;
