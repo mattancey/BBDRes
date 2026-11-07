@@ -43,7 +43,7 @@ private:
     struct Targets
     {
         float tune, fine, feedback, inLog2, loopLog2, mix, level, drive, bbd, noise;
-        float lfoRate, lfoDepth, loopDyn, drift, spread, cross;
+        float lfoRate, lfoOffset, lfoDepth, loopDyn, drift, spread, cross, holdLen;
         int curve, root, scale, lfoShape, lfoTarget, lfoSync;
         bool quantize, freeze;
     };
@@ -64,6 +64,8 @@ private:
     std::atomic<float>* bbdP = nullptr;
     std::atomic<float>* noiseP = nullptr;
     std::atomic<float>* freezeP = nullptr;
+    std::atomic<float>* holdLenP = nullptr;
+    juce::RangedAudioParameter* lfoRateParam = nullptr;   // pour lire la position normalisée (décalage en mode sync)
     std::atomic<float>* rootP = nullptr;
     std::atomic<float>* scaleP = nullptr;
     std::atomic<float>* quantizeP = nullptr;
@@ -77,10 +79,11 @@ private:
     std::atomic<float>* crossP = nullptr;
 
     double currentSampleRate = 44100.0;
+    double syncPhaseAcc = 0.0;   // phase du LFO synchronisé quand le transport est à l'arrêt
 
     bbdres::Resonator resonators[2];
     bbdres::Smoother tuneSm, fbSm, inSm, loopSm, mixSm, levelSm, driveSm, bbdSm,
-                     noiseSm, spreadSm, crossSm, freezeSm;
+                     noiseSm, spreadSm, crossSm;
     bbdres::Lfo lfo, driftTuneLfo[2], driftFilterLfo[2];
     bbdres::EnvFollower env;
     float mixPrev = 0.5f, levelPrev = 1.0f;
