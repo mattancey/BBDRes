@@ -151,57 +151,119 @@ static double bandDb (const std::vector<float>& y, double f0, double f1, float f
     return s / k;
 }
 
-// Freeze : capture de la sortie humide, rejouée en boucle
+// Freeze : le son figé garde son niveau, ne dépend plus de l'entrée, sans point de bouclage audible
 static void testFreeze()
 {
     const float fs = 48000.0f;
-    for (float fb : { 0.0f, 0.3f, 0.7f, 0.95f })
+    auto rms = [] (const std::vector<float>& v) { double s = 0; for (float x : v) s += (double) x * x; return (float) std::sqrt (s / (double) v.size()); };
+    // fluctuation du niveau : écart-type relatif de la valeur RMS par fenêtres de 20 ms
+    auto flutter = [&] (const std::vector<float>& v)
     {
-        Resonator a, b; a.prepare (fs, 1u); b.prepare (fs, 1u);   // a : l'entrée continue ; b : entrée coupée
-        ResonatorParams p; p.semitones = 48.0f; p.feedback = fb; p.inputLpHz = 8000.0f; p.loopLpHz = 6000.0f; p.bbd = 0.3f;
-        a.update (p); b.update (p); a.reset(); b.reset();
-        float lp = 0.0f;
-        auto pad = [&] { lp += 0.05f * (0.3f * rnd() - lp); return lp * 4.0f; };
-        auto rms = [] (const std::vector<float>& v) { double s = 0; for (float x : v) s += (double) x * x; return (float) std::sqrt (s / (double) v.size()); };
-        std::vector<float> win (24000);
-        for (int i = 0; i < 48000; ++i) { const float x = pad(); a.process (x); b.process (x); }
-        for (auto& v : win) { const float x = pad(); v = a.process (x); b.process (x); }
-        const float before = rms (win);
-        p.freeze = 1.0f; a.update (p); b.update (p);
-        for (int i = 0; i < 4800; ++i) { const float x = pad(); a.process (x); b.process (0.0f); }
-        std::vector<float> wa (24000), wb (24000);
-        for (size_t i = 0; i < wa.size(); ++i) { wa[i] = a.process (pad()); wb[i] = b.process (0.0f); }
-        const float early = rms (wa), earlyB = rms (wb);
-        for (int i = 0; i < 48000 * 4; ++i) { a.process (pad()); b.process (0.0f); }
-        for (size_t i = 0; i < wa.size(); ++i) wa[i] = a.process (pad());
-        const float late = rms (wa);
-        const float dEarly = 20.0f * std::log10 (early / before), dDrift = 20.0f * std::log10 (late / early);
-        const float dIndep = 20.0f * std::log10 (earlyB / early);
-        std::printf ("freeze fb=%.2f : niveau gele %+.1f dB vs avant ; derive sur 4 s %+.2f dB ; independance de l'entree %+.2f dB\n",
-                     fb, dEarly, dDrift, dIndep);
-        check (std::fabs (dEarly) < 3.0f, "freeze : niveau different de ce qu'on entendait");
-        check (std::fabs (dDrift) < 0.3f, "freeze : le niveau derive");
-        check (std::fabs (dIndep) < 0.3f, "freeze : la boucle depend encore de l'entree");
-        // relachement : retour au signal direct, sans valeur non finie
-        p.freeze = 0.0f; a.update (p);
-        bool finite = true;
-        for (int i = 0; i < 48000; ++i) if (! std::isfinite (a.process (pad()))) finite = false;
-        check (finite, "freeze : valeur non finie au relachement");
-    }
+        const size_t w = (size_t) (0.02f * fs); std::vector<double> r;
+        for (size_t i = 0; i + w <= v.size(); i += w) { double s = 0; for (size_t k = 0; k < w; ++k) s += (double) v[i + k] * v[i + k]; r.push_back (std::sqrt (s / (double) w)); }
+        double m = 0; for (double x : r) m += x; m /= (double) r.size();
+        double q = 0; for (double x : r) q += (x - m) * (x - m);
+        return (float) (std::sqrt (q / (double) r.size()) / m);
+    };
 
-    // Raccord : sur un signal periodique, la boucle ne doit pas faire de clic
+    // 1) pad : niveau, indépendance de l'entrée, stabilité, relâchement
+    for (float hl : { 0.0f, 0.5f, 1.0f })
+        for (float fb : { 0.3f, 0.95f })
+        {
+            Resonator a, b; a.prepare (fs, 1u); b.prepare (fs, 1u);   // a : l'entrée continue ; b : entrée coupée
+            ResonatorParams p; p.semitones = 48.0f; p.feedback = fb; p.inputLpHz = 8000.0f; p.loopLpHz = 6000.0f; p.bbd = 0.3f; p.holdLen = hl;
+            a.update (p); b.update (p); a.reset(); b.reset();
+            float lp = 0.0f;
+            auto pad = [&] { lp += 0.05f * (0.3f * rnd() - lp); return lp * 4.0f; };
+            std::vector<float> win (48000);
+            for (int i = 0; i < 48000; ++i) { const float x = pad(); a.process (x); b.process (x); }
+            for (auto& v : win) { const float x = pad(); v = a.process (x); b.process (x); }
+            const float before = rms (win), flutLive = flutter (win);
+            p.freeze = 1.0f; a.update (p); b.update (p);
+            for (int i = 0; i < 4800; ++i) { const float x = pad(); a.process (x); b.process (0.0f); }
+            std::vector<float> wa (96000), wb (96000);
+            for (size_t i = 0; i < wa.size(); ++i) { wa[i] = a.process (pad()); wb[i] = b.process (0.0f); }
+            const float early = rms (wa), earlyB = rms (wb), flutFrozen = flutter (wa);
+            for (int i = 0; i < 48000 * 4; ++i) { a.process (pad()); b.process (0.0f); }
+            for (size_t i = 0; i < wa.size(); ++i) wa[i] = a.process (pad());
+            const float late = rms (wa);
+            const float dEarly = 20.0f * std::log10 (early / before), dDrift = 20.0f * std::log10 (late / early);
+            const float dIndep = 20.0f * std::log10 (earlyB / early);
+            std::printf ("freeze mem=%.1f fb=%.2f : niveau %+.1f dB ; derive %+.2f dB ; indep. entree %+.2f dB ; fluctuation %.2f (direct %.2f)\n",
+                         hl, fb, dEarly, dDrift, dIndep, flutFrozen, flutLive);
+            check (std::fabs (dEarly) < 2.5f, "freeze : niveau different de ce qu'on entendait");
+            check (std::fabs (dDrift) < 0.3f, "freeze : le niveau derive");
+            check (std::fabs (dIndep) < 0.3f, "freeze : la boucle depend encore de l'entree");
+            check (flutFrozen < 1.3f * flutLive + 0.05f, "freeze : pulsation de niveau audible (point de bouclage)");
+            p.freeze = 0.0f; a.update (p);
+            bool finite = true;
+            for (int i = 0; i < 48000; ++i) if (! std::isfinite (a.process (pad()))) finite = false;
+            check (finite, "freeze : valeur non finie au relachement");
+        }
+
+    // 2) signal périodique : aucun saut au raccord, niveau constant
+    for (float hl : { 0.0f, 0.6f, 1.0f })
     {
         const double f0 = 440.0 * std::pow (2.0, (48.0 - 69.0) / 12.0);
         Resonator r; r.prepare (fs);
-        ResonatorParams p; p.semitones = 48.0f; p.feedback = 0.9f; p.inputLpHz = 8000.0f; p.loopLpHz = 6000.0f;
+        ResonatorParams p; p.semitones = 48.0f; p.feedback = 0.9f; p.inputLpHz = 8000.0f; p.loopLpHz = 6000.0f; p.holdLen = hl;
         r.update (p); r.reset();
         auto tone = [&] (int i) { return (float) (0.3 * std::sin (2.0 * 3.14159265358979 * f0 * i / (double) fs)); };
         int n = 0; float prev = 0.0f, maxLive = 0.0f, maxFrozen = 0.0f;
         for (int i = 0; i < 96000; ++i) { const float y = r.process (tone (n++)); if (i > 48000) maxLive = std::max (maxLive, std::fabs (y - prev)); prev = y; }
         p.freeze = 1.0f; r.update (p);
-        for (int i = 0; i < 200000; ++i) { const float y = r.process (tone (n++)); if (i > 2400) maxFrozen = std::max (maxFrozen, std::fabs (y - prev)); prev = y; }
-        std::printf ("freeze raccord : saut max en direct %.4f ; gele %.4f\n", maxLive, maxFrozen);
-        check (maxFrozen < 1.5f * maxLive, "freeze : clic au raccord de la boucle");
+        std::vector<float> fr (96000);
+        for (int i = 0; i < 4800; ++i) prev = r.process (tone (n++));
+        for (size_t i = 0; i < fr.size(); ++i) { const float y = r.process (tone (n++)); fr[i] = y; maxFrozen = std::max (maxFrozen, std::fabs (y - prev)); prev = y; }
+        const float fl = flutter (fr);
+        std::printf ("freeze periodique mem=%.1f : saut max en direct %.4f ; gele %.4f ; fluctuation %.3f\n", hl, maxLive, maxFrozen, fl);
+        check (maxFrozen < 1.3f * maxLive, "freeze : saut au raccord de la boucle");
+        check (fl < 0.05f, "freeze : le niveau pulse sur un signal periodique");
+    }
+
+    // 3) le son figé se joue : Tune +12 demi-tons = une octave plus haut
+    {
+        const double f0 = 440.0 * std::pow (2.0, (48.0 - 69.0) / 12.0);
+        Resonator r; r.prepare (fs);
+        ResonatorParams p; p.semitones = 48.0f; p.feedback = 0.9f; p.inputLpHz = 8000.0f; p.loopLpHz = 12000.0f; p.holdLen = 0.4f;
+        r.update (p); r.reset();
+        auto tone = [&] (int i) { return (float) (0.3 * std::sin (2.0 * 3.14159265358979 * f0 * i / (double) fs)); };
+        int n = 0;
+        for (int i = 0; i < 96000; ++i) r.process (tone (n++));
+        p.freeze = 1.0f; r.update (p);
+        for (int i = 0; i < 9600; ++i) r.process (0.0f);
+        p.semitones = 60.0f; r.update (p);
+        for (int i = 0; i < 4800; ++i) r.process (0.0f);
+        std::vector<float> y (24000);
+        for (auto& v : y) v = r.process (0.0f);
+        const double pLow = dftPow (y, f0, fs), pHigh = dftPow (y, 2.0 * f0, fs);
+        std::printf ("freeze joue : puissance a f0 = %.5f ; a 2 x f0 = %.5f\n", pLow, pHigh);
+        check (pHigh > 10.0 * pLow, "freeze : la hauteur ne suit pas Tune");
+    }
+}
+
+// Pas de clic quand le BBD quitte zéro (le filtre ne doit pas s'enclencher d'un coup)
+static void testBbdClick()
+{
+    const float fs = 48000.0f;
+    for (float note : { 24.0f, 36.0f, 48.0f })
+    {
+        const float w0 = 2.0f * 3.14159265f * 440.0f * std::pow (2.0f, (note - 69.0f) / 12.0f);
+        Resonator r; r.prepare (fs);
+        ResonatorParams p; p.semitones = note; p.feedback = 0.7f; p.inputLpHz = 20000.0f; p.loopLpHz = 12000.0f; p.bbd = 0.0f;
+        p.jitterGain = 0.0f; p.noiseGain = 0.0f;
+        r.update (p); r.reset();
+        float prev = 0.0f, base = 0.0f, worst = 0.0f;
+        for (int i = 0; i < 48000; ++i)
+        {
+            if (i % 16 == 0) { p.bbd = (i >= 24000) ? 0.01f : 0.0f; r.update (p); }   // marche franche 0 -> 1 %
+            const float y = r.process (0.3f * std::sin (w0 * (float) i / fs));
+            const float d = std::fabs (y - prev); prev = y;
+            if (i > 12000 && i < 24000) base = std::max (base, d);
+            if (i >= 24000) worst = std::max (worst, d);
+        }
+        std::printf ("clic BBD note %.0f : saut max apres marche 0 -> 1 %% = %.2f x la reference\n", note, worst / base);
+        check (worst < 1.5f * base, "BBD : clic au debut de la course");
     }
 }
 
@@ -356,6 +418,7 @@ int main()
     testCoupledStability (96000.0f);
     testFreeze();
     testNoiseAndBbd();
+    testBbdClick();
     for (float cr : { 0.25f, 0.5f, 1.0f })
         for (float n : { 36.0f, 60.0f, 84.0f })
         {
