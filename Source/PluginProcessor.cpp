@@ -20,6 +20,8 @@ BBDResAudioProcessor::BBDResAudioProcessor()
     bbdP       = apvts.getRawParameterValue (ParamIDs::bbd);
     noiseP     = apvts.getRawParameterValue (ParamIDs::noise);
     freezeP    = apvts.getRawParameterValue (ParamIDs::freeze);
+    holdLenP   = apvts.getRawParameterValue (ParamIDs::holdLen);
+    lfoRateParam = apvts.getParameter (ParamIDs::lfoRate);
     rootP      = apvts.getRawParameterValue (ParamIDs::root);
     scaleP     = apvts.getRawParameterValue (ParamIDs::scale);
     quantizeP  = apvts.getRawParameterValue (ParamIDs::quantize);
@@ -44,9 +46,17 @@ juce::AudioProcessorValueTreeState::ParameterLayout BBDResAudioProcessor::create
         return v >= 1000.0f ? juce::String (v / 1000.0f, 1) + " kHz"
                             : juce::String (juce::roundToInt (v)) + " Hz";
     };
-    auto lfoHz = [] (float v, int)
+    const Range lfoRange (0.02f, 20.0f, 0.0f, 0.35f);
+    // Même curseur pour deux usages : fréquence en mode libre, décalage de phase en mode synchronisé
+    auto lfoHzPhase = [lfoRange] (float v, int)
     {
-        return juce::String (v, v < 1.0f ? 2 : 1) + " Hz";
+        const int pct = juce::roundToInt (lfoRange.convertTo0to1 (v) * 100.0f);
+        return juce::String (v, v < 1.0f ? 2 : 1) + " Hz  |  sync : " + juce::String (pct) + " %";
+    };
+    auto holdTime = [] (float v, int)
+    {
+        const float sec = 0.05f * std::pow (20.0f, v);
+        return sec < 1.0f ? juce::String (juce::roundToInt (sec * 1000.0f)) + " ms" : juce::String (sec, 2) + " s";
     };
     auto note = [] (float v, int)
     {
@@ -109,6 +119,10 @@ juce::AudioProcessorValueTreeState::ParameterLayout BBDResAudioProcessor::create
     layout.add (std::make_unique<juce::AudioParameterBool> (
         juce::ParameterID { ParamIDs::freeze, 1 }, "Freeze", false));
 
+    layout.add (std::make_unique<juce::AudioParameterFloat> (
+        juce::ParameterID { ParamIDs::holdLen, 1 }, "Hold Length",
+        Range (0.0f, 1.0f, 0.001f), 0.5f, Attr().withStringFromValueFunction (holdTime)));
+
     // --- Pitch ---
     layout.add (std::make_unique<juce::AudioParameterChoice> (
         juce::ParameterID { ParamIDs::root, 1 }, "Root",
@@ -129,8 +143,8 @@ juce::AudioProcessorValueTreeState::ParameterLayout BBDResAudioProcessor::create
         juce::ParameterID { ParamIDs::lfoSync, 1 }, "LFO Sync", syncNames, 0));
 
     layout.add (std::make_unique<juce::AudioParameterFloat> (
-        juce::ParameterID { ParamIDs::lfoRate, 1 }, "LFO Rate",
-        Range (0.02f, 20.0f, 0.0f, 0.35f), 0.5f, Attr().withStringFromValueFunction (lfoHz)));
+        juce::ParameterID { ParamIDs::lfoRate, 1 }, "LFO Rate / Sync Phase",
+        lfoRange, 0.5f, Attr().withStringFromValueFunction (lfoHzPhase)));
 
     layout.add (std::make_unique<juce::AudioParameterFloat> (
         juce::ParameterID { ParamIDs::lfoDepth, 1 }, "LFO Depth",
@@ -179,6 +193,8 @@ BBDResAudioProcessor::Targets BBDResAudioProcessor::readTargets() const
     t.bbd       = bbdP->load();
     t.noise     = noiseP->load();
     t.lfoRate   = lfoRateP->load();
+    t.lfoOffset = lfoRateParam->getValue();   // 0..1 : position du curseur = décalage en mode sync
+    t.holdLen   = holdLenP->load();
     t.lfoDepth  = lfoDepthP->load();
     t.loopDyn   = loopDynP->load();
     t.drift     = driftP->load();
@@ -198,6 +214,7 @@ BBDResAudioProcessor::Targets BBDResAudioProcessor::readTargets() const
 void BBDResAudioProcessor::prepareToPlay (double sampleRate, int)
 {
     currentSampleRate = sampleRate;
+    syncPhaseAcc = 0.0;
     const float fs = (float) sampleRate;
     const float controlRate = fs / (float) kControlBlock;
 
@@ -304,13 +321,18 @@ void BBDResAudioProcessor::processBlock (juce::AudioBuffer<float>& buffer, juce:
         }
         else if (transportLocked)
         {
+            // Calé sur la position de l'hôte ; le curseur Rate décale la phase (0 à 1 cycle)
             const double ppq = ppqStart + (double) start * bpm / (60.0 * currentSampleRate);
-            lfoRaw = lfo.nextAt (t.lfoShape, bbdres::syncedPhase (ppq, beatsPerCycle));
+            const float ph = (float) std::fmod ((double) bbdres::syncedPhase (ppq, beatsPerCycle) + (double) t.lfoOffset, 1.0);
+            lfoRaw = lfo.nextAt (t.lfoShape, ph);
         }
         else
         {
-            lfo.setRateHz ((float) (bpm / 60.0 / (double) beatsPerCycle));
-            lfoRaw = lfo.next (t.lfoShape);
+            // Transport à l'arrêt : le LFO tourne au bon tempo, avec le même décalage
+            syncPhaseAcc += bpm / 60.0 / (double) beatsPerCycle * (double) kControlBlock / currentSampleRate;
+            syncPhaseAcc -= std::floor (syncPhaseAcc);
+            const float ph = (float) std::fmod (syncPhaseAcc + (double) t.lfoOffset, 1.0);
+            lfoRaw = lfo.nextAt (t.lfoShape, ph);
         }
         const float lfoV = lfoRaw * t.lfoDepth;
 
@@ -349,7 +371,8 @@ void BBDResAudioProcessor::processBlock (juce::AudioBuffer<float>& buffer, juce:
         rp.curve     = t.curve;
         rp.bbd       = bbdSm.next (t.bbd);
         rp.noise     = noiseSm.next (t.noise);
-        rp.freeze    = t.freeze ? 1.0f : 0.0f;   // front montant = capture de la boucle
+        rp.freeze    = t.freeze ? 1.0f : 0.0f;   // front montant = fige le son
+        rp.holdLen   = t.holdLen;
         const float crossAmt = crossSm.next (t.cross);
         rp.cross     = numCh > 1 ? crossAmt : 0.0f;
         const float mixNew = mixSm.next (t.mix);
