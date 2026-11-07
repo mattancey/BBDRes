@@ -5,7 +5,7 @@ cmake_minimum_required(VERSION 3.22)
 set(CMAKE_OSX_ARCHITECTURES "arm64;x86_64" CACHE STRING "Architectures")
 set(CMAKE_OSX_DEPLOYMENT_TARGET "11.0" CACHE STRING "Version minimale de macOS")
  
-project(BBDRes VERSION 0.1.0)
+project(BBDResV2 VERSION 2.0.0)
  
 set(CMAKE_CXX_STANDARD 17)
 set(CMAKE_CXX_STANDARD_REQUIRED ON)
@@ -19,26 +19,29 @@ FetchContent_Declare(
     GIT_SHALLOW ON)
 FetchContent_MakeAvailable(JUCE)
  
-juce_add_plugin(BBDRes
+# V2 : identité distincte (nom et code de plug-in) pour cohabiter avec la V1 dans Live
+juce_add_plugin(BBDResV2
     COMPANY_NAME "Perso"
     PLUGIN_MANUFACTURER_CODE Perx
-    PLUGIN_CODE Bbdr
+    PLUGIN_CODE BbV2
     FORMATS AU VST3
-    PRODUCT_NAME "BBDRes"
+    PRODUCT_NAME "BBDRes V2"
     COPY_PLUGIN_AFTER_BUILD FALSE)
  
-target_sources(BBDRes PRIVATE
+target_sources(BBDResV2 PRIVATE
     Source/PluginProcessor.h
     Source/Params.h
     Source/Dsp/Resonator.h
+    Source/Dsp/Pitch.h
+    Source/Dsp/Modulation.h
     Source/PluginProcessor.cpp)
  
-target_compile_definitions(BBDRes PUBLIC
+target_compile_definitions(BBDResV2 PUBLIC
     JUCE_WEB_BROWSER=0
     JUCE_USE_CURL=0
     JUCE_VST3_CAN_REPLACE_VST2=0)
  
-target_link_libraries(BBDRes
+target_link_libraries(BBDResV2
     PRIVATE
         juce::juce_audio_utils
         juce::juce_dsp
