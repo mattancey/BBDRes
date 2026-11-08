@@ -303,6 +303,112 @@ static void testLooper()
     check (std::fabs (bbdres::holdSecondsFromSlider (0.0f) - 0.03f) < 1.0e-6f && std::fabs (bbdres::holdSecondsFromSlider (1.0f) - 4.0f) < 1.0e-4f, "curseur de longueur");
 }
 
+// Release du looper : 0,5 s linéaire quand on décoche Freeze ; entrée rapide
+static void testRelease()
+{
+    const float fs = 48000.0f;
+    Resonator a, b; a.prepare (fs, 1u); b.prepare (fs, 1u);
+    ResonatorParams p; p.semitones = 48.0f; p.feedback = 0.7f; p.inputLpHz = 8000.0f; p.loopLpHz = 6000.0f; p.bbd = 0.3f; p.holdSeconds = 0.3f;
+    a.update (p); b.update (p); a.reset(); b.reset();
+    // même signal pour les deux : a passe par le looper, b reste en direct
+    std::vector<float> src; float lp = 0.0f;
+    for (int i = 0; i < 48000 * 7; ++i) { lp += 0.05f * (0.3f * rnd() - lp); src.push_back (lp * 4.0f); }
+    size_t k = 0;
+    auto step = [&] (ResonatorParams& pa, std::vector<float>* diff)
+    {
+        if (k % 16 == 0) { a.update (pa); b.update (p); }
+        const float x = src[k++];
+        const float ya = a.process (x), yb = b.process (x);
+        if (diff) diff->push_back (ya - yb);
+    };
+    auto pa = p;
+    for (int i = 0; i < 48000 * 3; ++i) step (pa, nullptr);
+    pa.freeze = 1.0f;
+    std::vector<float> engage;
+    for (int i = 0; i < 48000 * 2; ++i) step (pa, &engage);
+    pa.freeze = 0.0f;
+    std::vector<float> rel;
+    for (int i = 0; i < 48000 * 1; ++i) step (pa, &rel);
+    auto rmsw = [&] (const std::vector<float>& v, float t0, float t1)
+    {
+        double s2 = 0; const size_t i0 = (size_t) (t0 * fs), i1 = std::min (v.size(), (size_t) (t1 * fs));
+        for (size_t i = i0; i < i1; ++i) s2 += (double) v[i] * v[i];
+        return (float) std::sqrt (s2 / (double) (i1 - i0));
+    };
+    const float steady = rmsw (engage, 1.0f, 2.0f);
+    const float e100 = rmsw (engage, 0.08f, 0.10f) / steady;              // 100 ms après l'engagement
+    const float r0 = rmsw (rel, 0.0f, 0.05f), r250 = rmsw (rel, 0.225f, 0.275f), r400 = rmsw (rel, 0.375f, 0.425f);
+    const float rEnd = rmsw (rel, 0.55f, 0.9f);
+    std::printf ("release : entree a 100 ms = %.2f du regime ; ecart direct/looper : debut %.4f, 250 ms %.2f, 400 ms %.2f, apres 0.55 s %.6f\n",
+                 e100, r0, r250 / r0, r400 / r0, rEnd);
+    check (e100 > 0.8f, "release : l'entree dans le looper est trop lente");
+    check (r250 / r0 > 0.3f && r250 / r0 < 0.7f, "release : pas lineaire a mi-parcours");
+    check (r400 / r0 < 0.45f, "release : trop lente");
+    check (rEnd < 1.0e-6f, "release : le looper ne s'eteint pas en 0,5 s");
+}
+
+// Filtres du looper : passe-haut et passe-bas 12 dB, uniquement sur la boucle
+static void testHoldFilter()
+{
+    const float fs = 48000.0f;
+    std::vector<float> src;
+    for (int i = 0; i < 48000 * 4; ++i) src.push_back (0.3f * rnd());           // bruit large bande
+    auto capture = [&] (float hp, float lp)
+    {
+        Resonator r; r.prepare (fs, 1u);
+        ResonatorParams p; p.semitones = 48.0f; p.feedback = 0.7f; p.inputLpHz = 20000.0f; p.loopLpHz = 20000.0f; p.bbd = 0.0f; p.holdSeconds = 0.5f;
+        r.update (p); r.reset();
+        for (int i = 0; i < 48000 * 2; ++i) { if (i % 16 == 0) r.update (p); r.process (src[(size_t) i]); }
+        p.freeze = 1.0f; p.holdHpHz = hp; p.holdLpHz = lp;
+        std::vector<float> y;
+        for (int i = 0; i < 48000 * 2; ++i) { if (i % 16 == 0) r.update (p); const float v = r.process (src[(size_t) (i + 96000)]); if (i >= 48000) y.push_back (v); }
+        return y;
+    };
+    // Mesure avec fenêtre de Hann : sans elle, la fuite spectrale des graves masque les aigus très atténués
+    auto db = [&] (const std::vector<float>& y, double f0, double f1)
+    {
+        double acc = 0.0; int cnt = 0; const size_t n = y.size();
+        for (double f = f0; f <= f1; f += (f1 - f0) / 24.0)
+        {
+            const double w = 2.0 * 3.14159265358979 * f / (double) fs; double re = 0, im = 0;
+            for (size_t i = 0; i < n; ++i)
+            {
+                const double win = 0.5 - 0.5 * std::cos (2.0 * 3.14159265358979 * (double) i / (double) (n - 1));
+                re += y[i] * win * std::cos (w * (double) i); im -= y[i] * win * std::sin (w * (double) i);
+            }
+            acc += 10.0 * std::log10 ((re * re + im * im) / (double) n + 1e-30); ++cnt;
+        }
+        return acc / cnt;
+    };
+    const auto open = capture (20.0f, 20000.0f);
+    const auto hp = capture (1000.0f, 20000.0f), lp = capture (20.0f, 1000.0f), band = capture (500.0f, 1000.0f), closed = capture (2000.0f, 500.0f);
+    const double lowHp = db (hp, 100, 200) - db (open, 100, 200), midHp = db (hp, 3000, 4000) - db (open, 3000, 4000);
+    const double highLp = db (lp, 5000, 8000) - db (open, 5000, 8000), midLp = db (lp, 300, 600) - db (open, 300, 600);
+    const double lowB = db (band, 100, 200) - db (open, 100, 200), highB = db (band, 5000, 8000) - db (open, 5000, 8000);
+    double so = 0, sc = 0;
+    for (float v : open) so += (double) v * v;
+    for (float v : closed) sc += (double) v * v;
+    const double closedDb = 10.0 * std::log10 (sc / so);
+    std::printf ("filtres du looper : HP 1 kHz -> 100-200 Hz %+.1f dB, 3-4 kHz %+.1f dB ; LP 1 kHz -> 5-8 kHz %+.1f dB, 300-600 Hz %+.1f dB ; "
+                 "bande 500-1000 -> graves %+.1f dB, aigus %+.1f dB ; HP 2k + LP 500 (croises) -> %+.1f dB\n",
+                 lowHp, midHp, highLp, midLp, lowB, highB, closedDb);
+    check (lowHp < -18.0, "HP : les graves ne sont pas assez coupes");
+    check (std::fabs (midHp) < 1.5, "HP : les mediums sont alteres");
+    check (highLp < -18.0, "LP : les aigus ne sont pas assez coupes");
+    check (std::fabs (midLp) < 1.5, "LP : les mediums sont alteres");
+    check (lowB < -12.0 && highB < -12.0, "bande : graves et aigus doivent etre coupes");
+    check (closedDb < -25.0, "filtres croises : presque rien ne doit passer");
+
+    // le son direct n'est jamais touché : sans Freeze, les réglages des filtres ne changent rien
+    Resonator a, b; a.prepare (fs, 1u); b.prepare (fs, 1u);
+    ResonatorParams pa; pa.holdHpHz = 5000.0f; pa.holdLpHz = 300.0f;
+    ResonatorParams pb;
+    a.update (pa); b.update (pb); a.reset(); b.reset();
+    float dmax = 0.0f;
+    for (int i = 0; i < 48000; ++i) { if (i % 16 == 0) { a.update (pa); b.update (pb); } dmax = std::max (dmax, std::fabs (a.process (src[(size_t) i]) - b.process (src[(size_t) i]))); }
+    check (dmax == 0.0f, "les filtres du looper modifient le son direct");
+}
+
 // Pas de clic quand le BBD quitte zéro (le filtre ne doit pas s'enclencher d'un coup)
 static void testBbdClick()
 {
@@ -478,6 +584,8 @@ int main()
     testCoupledStability (44100.0f);
     testCoupledStability (96000.0f);
     testLooper();
+    testRelease();
+    testHoldFilter();
     testNoiseAndBbd();
     testBbdClick();
     for (float cr : { 0.25f, 0.5f, 1.0f })
