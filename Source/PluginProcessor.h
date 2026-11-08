@@ -43,9 +43,9 @@ private:
     struct Targets
     {
         float tune, fine, feedback, inLog2, loopLog2, mix, level, drive, bbd, noise;
-        float lfoRate, lfoOffset, lfoDepth, loopDyn, drift, spread, cross, holdLen;
+        float lfoRate, lfoOffset, lfoDepth, loopDyn, drift, spread, cross, holdLen, holdMix;
         int curve, root, scale, lfoShape, lfoTarget, lfoSync;
-        bool quantize, freeze;
+        bool quantize, freeze, holdQuant;
     };
     Targets readTargets() const;
 
@@ -65,7 +65,9 @@ private:
     std::atomic<float>* noiseP = nullptr;
     std::atomic<float>* freezeP = nullptr;
     std::atomic<float>* holdLenP = nullptr;
-    juce::RangedAudioParameter* lfoRateParam = nullptr;   // pour lire la position normalisée (décalage en mode sync)
+    std::atomic<float>* holdQuantP = nullptr;
+    std::atomic<float>* holdMixP = nullptr;
+    std::atomic<float>* lfoPhaseP = nullptr;
     std::atomic<float>* rootP = nullptr;
     std::atomic<float>* scaleP = nullptr;
     std::atomic<float>* quantizeP = nullptr;
