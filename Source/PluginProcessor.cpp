@@ -23,6 +23,8 @@ BBDResAudioProcessor::BBDResAudioProcessor()
     holdLenP   = apvts.getRawParameterValue (ParamIDs::holdLen);
     holdQuantP = apvts.getRawParameterValue (ParamIDs::holdQuant);
     holdMixP   = apvts.getRawParameterValue (ParamIDs::holdMix);
+    holdHpP    = apvts.getRawParameterValue (ParamIDs::holdHP);
+    holdLpP    = apvts.getRawParameterValue (ParamIDs::holdLP);
     lfoPhaseP  = apvts.getRawParameterValue (ParamIDs::lfoPhase);
     rootP      = apvts.getRawParameterValue (ParamIDs::root);
     scaleP     = apvts.getRawParameterValue (ParamIDs::scale);
@@ -130,6 +132,15 @@ juce::AudioProcessorValueTreeState::ParameterLayout BBDResAudioProcessor::create
         juce::ParameterID { ParamIDs::holdMix, 1 }, "Hold Mix",
         Range (0.0f, 1.0f, 0.001f), 1.0f, Attr().withStringFromValueFunction (percent)));
 
+    // Filtre du looper : deux filtres 12 dB (passe-haut à gauche, passe-bas à droite), uniquement sur la boucle
+    layout.add (std::make_unique<juce::AudioParameterFloat> (
+        juce::ParameterID { ParamIDs::holdHP, 1 }, "Hold HP 12dB",
+        Range (20.0f, 20000.0f, 0.0f, 0.2f), 20.0f, Attr().withStringFromValueFunction (hz)));
+
+    layout.add (std::make_unique<juce::AudioParameterFloat> (
+        juce::ParameterID { ParamIDs::holdLP, 1 }, "Hold LP 12dB",
+        Range (20.0f, 20000.0f, 0.0f, 0.2f), 20000.0f, Attr().withStringFromValueFunction (hz)));
+
     // --- Pitch ---
     layout.add (std::make_unique<juce::AudioParameterChoice> (
         juce::ParameterID { ParamIDs::root, 1 }, "Root",
@@ -207,6 +218,8 @@ BBDResAudioProcessor::Targets BBDResAudioProcessor::readTargets() const
     t.lfoOffset = lfoPhaseP->load();          // décalage de phase du LFO en mode sync (mémorisé à part de Rate)
     t.holdLen   = holdLenP->load();
     t.holdMix   = holdMixP->load();
+    t.holdHpLog2 = std::log2 (holdHpP->load());
+    t.holdLpLog2 = std::log2 (holdLpP->load());
     t.holdQuant = holdQuantP->load() > 0.5f;
     t.lfoDepth  = lfoDepthP->load();
     t.loopDyn   = loopDynP->load();
@@ -245,6 +258,8 @@ void BBDResAudioProcessor::prepareToPlay (double sampleRate, int)
     noiseSm.prepare (controlRate, 0.05f);
     spreadSm.prepare (controlRate, 0.05f);
     crossSm.prepare (controlRate, 0.05f);
+    holdHpSm.prepare (controlRate, 0.02f);
+    holdLpSm.prepare (controlRate, 0.02f);
 
     lfo.prepare (controlRate, 11u);
     // Dérives indépendantes à gauche et à droite (rythmes différents pour ne pas rester synchrones)
@@ -266,6 +281,8 @@ void BBDResAudioProcessor::prepareToPlay (double sampleRate, int)
     noiseSm.snap (t.noise);
     spreadSm.snap (t.spread);
     crossSm.snap (t.cross);
+    holdHpSm.snap (t.holdHpLog2);
+    holdLpSm.snap (t.holdLpLog2);
     mixPrev = t.mix;
     levelPrev = t.level;
 }
@@ -388,6 +405,8 @@ void BBDResAudioProcessor::processBlock (juce::AudioBuffer<float>& buffer, juce:
         rp.drive     = driveSm.next (t.drive);
         rp.curve     = t.curve;
         rp.bbd       = bbdSm.next (t.bbd);
+        rp.holdHpHz  = std::exp2 (holdHpSm.next (t.holdHpLog2));
+        rp.holdLpHz  = std::exp2 (holdLpSm.next (t.holdLpLog2));
         rp.noise     = noiseSm.next (t.noise);
         rp.freeze    = t.freeze ? 1.0f : 0.0f;   // front montant = fige le son
         const float crossAmt = crossSm.next (t.cross);
