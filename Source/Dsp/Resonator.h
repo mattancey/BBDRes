@@ -13,6 +13,10 @@ namespace bbdres
 {
 constexpr float kPi = 3.14159265358979323846f;
 
+// Mémoire du looper (Freeze) : de 30 ms à 4 s
+inline constexpr float kHoldMinSeconds = 0.03f;
+inline constexpr float kHoldMaxSeconds = 4.0f;
+
 // Lissage à la cadence de contrôle (un appel par sous-bloc)
 struct Smoother
 {
@@ -146,8 +150,10 @@ struct ResonatorParams
     float bbd = 0.0f;          // 0..1 : caractère BBD (bande passante liée à la note + grain)
     float noise = 0.0f;        // 0..1 : souffle de la ligne BBD (filtré comme le reste)
     float cross = 0.0f;        // 0..1 : couplage avec l'autre canal
-    float freeze = 0.0f;       // > 0.5 : fige le son (hold)
-    float holdLen = 0.5f;      // 0..1 : mémoire du hold, de 50 ms à 1 s (échelle exponentielle)
+    float freeze = 0.0f;       // > 0.5 : le looper capture le son et le rejoue
+    float holdSeconds = 0.35f; // longueur de la boucle, en secondes (déjà quantifiée si besoin)
+    float holdMix = 1.0f;      // 0..1 : boucle contre son d'origine
+    float holdSpeedSemis = 0.0f; // petite variation de vitesse de lecture (dérive de la mémoire)
     float noiseGain = 1.0f;    // réglage interne : multiplicateur du souffle
     float jitterGain = 1.0f;   // réglage interne : multiplicateur du jitter d'horloge
 };
@@ -156,19 +162,22 @@ struct ResonatorParams
 // La sortie humide est prise à la SORTIE DE LA LIGNE BBD (après le souffle et les filtres de boucle) :
 // le BBD colore donc tout le signal humide, et le signal sec revient par Mix.
 //
-// Freeze (hold) : la sortie brute de la ligne est enregistrée en continu. Au gel, les N derniers
-// échantillons (N = 4 x un nombre entier de périodes) sont rejoués par QUATRE lecteurs décalés de N/4,
-// chacun fenêtré en Hann. La somme des fenêtres est constante : il n'y a ni point de bouclage
-// audible ni pulsation, et le son reste cohérent en hauteur. La vitesse de lecture suit la note
-// (Tune, LFO, Drift, Spread) : le son figé se joue comme un oscillateur. Il repasse par les filtres
-// de boucle et le BBD en direct.
+// Freeze = looper à un seul lecteur. La sortie brute de la ligne est enregistrée en continu ; au gel,
+// les 4 dernières secondes sont copiées. La boucle est la fin de cette copie, et sa longueur se règle
+// en temps réel (jusqu'à 4 s). Le raccord est traité de deux façons :
+//  - la fin de boucle est choisie par CORRÉLATION : on cherche, sur 25 ms, le point de coupe où la fin
+//    ressemble le plus à ce qui précède le début (la phase des résonances se raccorde) ;
+//  - un fondu enchaîné court (12 ms) relie la fin au début. Tout changement de longueur en temps réel
+//    est lui aussi fondu entre l'ancienne et la nouvelle boucle.
+// La boucle repasse en direct par le filtre de boucle et le BBD, puis se mélange au son d'origine.
 class Resonator
 {
 public:
     static constexpr float kMaxLoopGain = 1.02f;       // > 1 : auto-oscillation possible
     static constexpr float kMinFreqHz = 20.0f;
-    static constexpr float kHoldMinSeconds = 0.05f;    // mémoire du hold : holdLen = 0
-    static constexpr float kHoldMaxSeconds = 1.0f;     // mémoire du hold : holdLen = 1
+    static constexpr float kFadeSeconds = 0.012f;      // fondu de raccord
+    static constexpr float kSearchSeconds = 0.025f;    // fenêtre de recherche de la corrélation
+    static constexpr float kLenChangeSeconds = 0.02f;  // intervalle minimal entre deux changements de longueur
 
     void prepare (float sampleRate, std::uint32_t seed = 1u)
     {
@@ -182,14 +191,15 @@ public:
         const float a = jitterLp.a;
         jitterNorm = std::sqrt (3.0f * (1.0f + a) / (1.0f - a));
 
-        // Enregistreur de la sortie brute de la ligne et mémoire de la boucle gelée
-        const int cap = (int) (fs * (kHoldMaxSeconds + 0.2f));
+        // Enregistreur continu et copie gelée : mémoire maximale + raccord + recherche
+        fzCap = (int) (fs * (kHoldMaxSeconds + kFadeSeconds + kSearchSeconds + 0.05f));
         int n = 1;
-        while (n < cap) n <<= 1;
+        while (n < fzCap) n <<= 1;
         rec.assign ((size_t) n, 0.0f);
         recMask = n - 1;
-        fzBuf.assign ((size_t) cap, 0.0f);
-        fzCap = cap;
+        fzBuf.assign ((size_t) fzCap, 0.0f);
+        fadeSamples = std::max (8, (int) (kFadeSeconds * fs));
+        searchSamples = (int) (kSearchSeconds * fs);
         fzSlew = 1.0f - std::exp (-1.0f / (0.03f * fs));
 
         update (ResonatorParams {});
@@ -200,15 +210,13 @@ public:
         delay.reset(); inLp.reset(); loop.reset(); dc.reset(); bw.reset(); jitterLp.reset(); lastLoop = 0.0f;
         loopF.reset(); bwF.reset();
         std::fill (rec.begin(), rec.end(), 0.0f);
-        recW = 0; frozen = false; fzMix = 0.0f; fzLen = 0;
+        recW = 0; frozen = false; fzMix = 0.0f; xfLeft = 0; sinceLenChange = 0;
     }
 
     void update (const ResonatorParams& p)
     {
         const float fb = std::clamp (p.feedback, 0.0f, 1.0f);
         const float f0 = 440.0f * std::exp2 ((p.semitones - 69.0f) / 12.0f);
-        f0Now = f0;
-        periodSamples = fs / f0;
         loopGain = fb * kMaxLoopGain;
         inGain = 1.0f - 0.8f * fb;
         loop.setCutoff (p.loopLpHz, fs);
@@ -232,7 +240,9 @@ public:
         const float bwHz = std::min (0.2f * R * f0, 0.45f * fs);
         bwMix = std::clamp (bbdAmt * 20.0f, 0.0f, 1.0f);
         bw.setLowpass (bwHz, fs);
-        bwF = bw; bwF.z1 = bwF.z2 = 0.0f;   // mêmes coefficients, état propre au chemin gelé
+        // Mêmes coefficients pour le chemin gelé ; son ÉTAT (z1, z2) ne doit JAMAIS être touché ici :
+        // update() est appelé toutes les 16 échantillons et l'effacer ferait un saut à chaque appel.
+        bwF.b0 = bw.b0; bwF.b1 = bw.b1; bwF.b2 = bw.b2; bwF.a1 = bw.a1; bwF.a2 = bw.a2;
         const float w = 2.0f * kPi * f0 / fs;
         float pd = loop.phaseDelay (f0, fs);
         {
@@ -254,11 +264,21 @@ public:
         // Les filtres de la boucle retardent la phase : on les compense pour rester juste
         delaySamples = std::clamp (fs / f0 - pd, 2.0f, maxDelay);
 
-        // Freeze : front montant = capture, front descendant = retour au signal direct
-        holdSeconds = kHoldMinSeconds * std::pow (kHoldMaxSeconds / kHoldMinSeconds, std::clamp (p.holdLen, 0.0f, 1.0f));
+        // Looper
+        holdMix = std::clamp (p.holdMix, 0.0f, 1.0f);
+        loopSpeed = std::exp2 (std::clamp (p.holdSpeedSemis, -2.0f, 2.0f) / 12.0f);
+        targetLen = (int) std::lround (std::clamp (p.holdSeconds, kHoldMinSeconds, kHoldMaxSeconds) * fs);
         const bool wantFrozen = p.freeze > 0.5f;
-        if (wantFrozen && ! frozen) captureLoop();
-        else if (! wantFrozen)      frozen = false;
+        if (wantFrozen && ! frozen)
+            captureLoop();
+        else if (! wantFrozen)
+            frozen = false;
+        else if (sinceLenChange >= (int) (kLenChangeSeconds * fs)
+                 && std::abs (targetLen - cur.L) > std::max (8, cur.L / 100))
+        {
+            applyLength (targetLen, true);          // longueur modifiée en temps réel
+            sinceLenChange = 0;
+        }
     }
 
     // crossV : sortie de boucle de l'autre canal (ignorée si cross = 0)
@@ -279,7 +299,7 @@ public:
         float raw = delay.read (d);
         if (noiseAmp > 0.0f)
             raw += noiseAmp * nextNoise();
-        rec[(size_t) recW] = raw;                 // enregistrement continu pour Freeze
+        rec[(size_t) recW] = raw;                 // enregistrement continu pour le looper
         recW = (recW + 1) & recMask;
 
         float v = loop.process (raw);
@@ -289,89 +309,130 @@ public:
         const float y = in + std::tanh (loopGain * vm);  // saturation douce dans la boucle
         delay.push (y);
 
-        // Sortie humide = sortie de la ligne (v), ou le son figé qui repasse par les mêmes filtres
+        // Sortie humide = sortie de la ligne (v), mélangée à la boucle qui repasse par les mêmes filtres
         float out = v;
         if (frozen || fzMix > 0.0f)
         {
-            float vf = loopF.process (readFrozen());
+            float vf = loopF.process (loopSample());
             vf += (bwF.process (vf) - vf) * bwMix;
             out += (vf - v) * fzMix;
-            fzMix += ((frozen ? 1.0f : 0.0f) - fzMix) * fzSlew;
+            fzMix += ((frozen ? holdMix : 0.0f) - fzMix) * fzSlew;
             if (! frozen && fzMix < 1.0e-4f) fzMix = 0.0f;
+            ++sinceLenChange;
         }
         return out;
     }
     float loopOut() const { return lastLoop; }
+    int loopLength() const { return cur.L; }   // longueur de la boucle en cours (échantillons)
 
 private:
-    // Interpolation cubique (Hermite) sur la boucle gelée, vue comme un cercle de n échantillons
-    float frozenAt (float ph) const
+    // Une « tête » de lecture : position p dans la fenêtre [S, E), longueur L, fondu de raccord X
+    struct Head { float p = 0.0f; int S = 0, E = 0, L = 1, X = 1; };
+
+    // Interpolation cubique (Hermite) dans la copie gelée
+    float frozenAt (float x) const
     {
-        const int n = fzLen;
-        const int i0 = (int) ph;
-        const float x = ph - (float) i0;
-        const float ym1 = fzBuf[(size_t) ((i0 - 1 + n) % n)], y0 = fzBuf[(size_t) i0];
-        const float y1 = fzBuf[(size_t) ((i0 + 1) % n)], y2 = fzBuf[(size_t) ((i0 + 2) % n)];
+        const int i0 = (int) x;
+        const float f = x - (float) i0;
+        const int hi = fzCap - 1;
+        const float ym1 = fzBuf[(size_t) std::clamp (i0 - 1, 0, hi)], y0 = fzBuf[(size_t) std::clamp (i0, 0, hi)];
+        const float y1 = fzBuf[(size_t) std::clamp (i0 + 1, 0, hi)], y2 = fzBuf[(size_t) std::clamp (i0 + 2, 0, hi)];
         const float c1 = 0.5f * (y1 - ym1);
         const float c2 = ym1 - 2.5f * y0 + 2.0f * y1 - 0.5f * y2;
         const float c3 = 0.5f * (y2 - ym1) + 1.5f * (y0 - y1);
-        return ((c3 * x + c2) * x + c1) * x + y0;
-    }
-    float window (float ph) const
-    {
-        const float sn = std::sin (kPi * ph / (float) fzLen);
-        return sn * sn;   // Hann : quatre fenêtres décalées de N/4 totalisent exactement 2
+        return ((c3 * f + c2) * f + c1) * f + y0;
     }
 
-    // Quatre lecteurs décalés de N/4, vitesse proportionnelle à la hauteur actuelle
-    float readFrozen()
+    // Dans les X derniers échantillons de la boucle, on fond vers ce qui PRÉCÈDE le début
+    float readHead (const Head& h) const
     {
-        const float speed = std::clamp (f0Now / fzCapF0, 0.125f, 8.0f);
-        const float len = (float) fzLen;
-        float sum = 0.0f;
-        for (int k = 0; k < 4; ++k)
+        float smp = frozenAt (h.p);
+        const float zone = (float) (h.E - h.X);
+        if (h.p >= zone)
         {
-            float ph = fzPhase[k];
-            sum += window (ph) * frozenAt (ph);
-            ph += speed;
-            while (ph >= len) ph -= len;
-            fzPhase[k] = ph;
+            const float wgt = (h.p - zone) / (float) h.X;
+            smp = smp * (1.0f - wgt) + frozenAt (h.p - (float) h.L) * wgt;
         }
-        return sum * 0.5f * fzGain;
+        return smp;
+    }
+    void advance (Head& h) const
+    {
+        h.p += loopSpeed;
+        if (h.p >= (float) h.E) h.p -= (float) h.L;
     }
 
-    // Copie les N derniers échantillons (N = 4 x un nombre entier de périodes : les lecteurs restent en phase)
+    float loopSample()
+    {
+        float smp = readHead (cur);
+        advance (cur);
+        if (xfLeft > 0)   // fondu entre l'ancienne et la nouvelle boucle
+        {
+            const float old = readHead (prevH);
+            advance (prevH);
+            const float wgt = 1.0f - (float) xfLeft / (float) xfLen;
+            smp = old * (1.0f - wgt) + smp * wgt;
+            --xfLeft;
+        }
+        return smp;
+    }
+
+    // Corrélation : décalage dl (en échantillons) de la fin de boucle, entre 0 et 25 ms, qui maximise la
+    // ressemblance entre la fin de boucle et ce qui précède son début. Mesure décimée (coût constant).
+    int bestDelta (int len, int fade) const
+    {
+        const int dmax = std::min (searchSamples, fzCap - len - fade - 2);
+        if (dmax <= 0) return 0;
+        const int stride = std::max (1, (int) (fs / 12000.0f)), step = std::max (1, (int) (fs / 24000.0f));
+        double best = -2.0; int bd = 0;
+        for (int dl = 0; dl <= dmax; dl += step)
+        {
+            const int e = fzCap - dl;
+            double sab = 0.0, saa = 0.0, sbb = 0.0;
+            for (int i = 0; i < fade; i += stride)
+            {
+                const double a = (double) fzBuf[(size_t) (e - fade + i)], b = (double) fzBuf[(size_t) (e - len - fade + i)];
+                sab += a * b; saa += a * a; sbb += b * b;
+            }
+            const double score = sab / std::sqrt (saa * sbb + 1.0e-20);
+            if (score > best) { best = score; bd = dl; }
+        }
+        return bd;
+    }
+
+    // Nouvelle longueur de boucle (fin choisie par corrélation). Si la tête est hors de la nouvelle
+    // fenêtre, elle est ramenée dedans ; avec fondu, l'ancienne boucle s'éteint pendant la nouvelle.
+    void applyLength (int newLen, bool withFade)
+    {
+        const int maxLen = fzCap - fadeSamples - searchSamples - 2;
+        newLen = std::clamp (newLen, 64, maxLen);
+        Head nh;
+        nh.L = newLen;
+        nh.X = std::max (8, std::min (fadeSamples, newLen / 3));
+        nh.E = fzCap - bestDelta (newLen, nh.X);
+        nh.S = nh.E - newLen;
+        float pos = cur.p;
+        if (pos < (float) nh.S || pos >= (float) nh.E)
+        {
+            float q = std::fmod (pos - (float) nh.S, (float) newLen);
+            if (q < 0.0f) q += (float) newLen;
+            pos = (float) nh.S + q;
+        }
+        nh.p = pos;
+        if (withFade) { prevH = cur; xfLen = fadeSamples; xfLeft = xfLen; }
+        cur = nh;
+    }
+
+    // Capture : copie des dernières secondes, puis boucle de la longueur demandée, lue depuis son début
     void captureLoop()
     {
-        const float period = std::max (periodSamples, 2.0f);
-        int m = std::max (1, (int) std::lround (holdSeconds * fs / (4.0f * period)));
-        int len = (int) std::lround (4.0f * (float) m * period);
-        while (len > fzCap && m > 1) { --m; len = (int) std::lround (4.0f * (float) m * period); }
-        len = std::clamp (len, 16, fzCap);
-        for (int n = 0; n < len; ++n)
-            fzBuf[(size_t) n] = rec[(size_t) ((recW - len + n) & recMask)];
-        fzLen = len;
-        fzCapF0 = f0Now;
-        for (int k = 0; k < 4; ++k) fzPhase[k] = (float) k * (float) len * 0.25f;
+        for (int n = 0; n < fzCap; ++n)
+            fzBuf[(size_t) n] = rec[(size_t) ((recW - fzCap + n) & recMask)];
+        cur = Head {};
+        applyLength (targetLen, false);
+        cur.p = (float) cur.S;
+        xfLeft = 0;
         loopF.reset(); bwF.reset();
-
-        // Gain de niveau : le son figé garde le niveau du son capturé, qu'il soit cohérent ou non
-        // (la somme des quatre fenêtres vaut 2 en amplitude, mais seulement 1,22 en puissance
-        // pour un contenu non corrélé). Mesure sur un tour de boucle, un échantillon sur 8.
-        double pin = 0.0, pout = 0.0; int cnt = 0;
-        for (int n = 0; n < len; n += 8)
-        {
-            double sum = 0.0;
-            for (int k = 0; k < 4; ++k)
-            {
-                const float ph = std::fmod ((float) n + (float) k * (float) len * 0.25f, (float) len);
-                sum += (double) window (ph) * (double) fzBuf[(size_t) std::min ((int) ph, len - 1)];
-            }
-            pout += 0.25 * sum * sum;
-            pin += (double) fzBuf[(size_t) n] * (double) fzBuf[(size_t) n];
-            ++cnt;
-        }
-        fzGain = (pout > 1.0e-20 && pin > 1.0e-20) ? std::clamp ((float) std::sqrt (pin / pout), 0.5f, 4.0f) : 1.0f;
+        sinceLenChange = 0;
         frozen = true;
     }
 
@@ -390,7 +451,7 @@ private:
         return (float) (std::int32_t) rng * (1.0f / 2147483648.0f);
     }
 
-    float fs = 48000.0f, maxDelay = 1000.0f, delaySamples = 100.0f, periodSamples = 100.0f, f0Now = 130.0f;
+    float fs = 48000.0f, maxDelay = 1000.0f, delaySamples = 100.0f;
     float loopGain = 0.0f, inGain = 1.0f, crossAmt = 0.0f, lastLoop = 0.0f, bwMix = 0.0f;
     float driveGain = 1.0f, driveComp = 1.0f, driveMix = 0.0f;
     int curve = 0;
@@ -401,11 +462,12 @@ private:
     OnePole loop, loopF, jitterLp;
     DcBlocker dc;
 
-    // Freeze
+    // Looper
     std::vector<float> rec, fzBuf;
-    int recMask = 0, recW = 0, fzLen = 0, fzCap = 0;
+    int recMask = 0, recW = 0, fzCap = 0, fadeSamples = 8, searchSamples = 0;
     bool frozen = false;
-    float fzMix = 0.0f, fzSlew = 0.001f, fzGain = 1.0f, fzCapF0 = 130.0f, holdSeconds = 0.2f;
-    float fzPhase[4] = { 0.0f, 0.0f, 0.0f, 0.0f };
+    float fzMix = 0.0f, fzSlew = 0.001f, holdMix = 1.0f, loopSpeed = 1.0f;
+    int targetLen = 16000, sinceLenChange = 0, xfLeft = 0, xfLen = 1;
+    Head cur, prevH;
 };
 } // namespace bbdres
