@@ -17,7 +17,9 @@ inline constexpr const char* loopDyn    = "loopDyn";     // -1..+1 : l'entrée o
 inline constexpr const char* bbd        = "bbd";         // caractère BBD 0..1 (bande passante + grain)
 inline constexpr const char* noise      = "noise";       // souffle 0..1
 inline constexpr const char* freeze     = "freeze";      // fige le son (hold)
-inline constexpr const char* holdLen    = "holdLen";     // mémoire du hold, de 50 ms à 1 s
+inline constexpr const char* holdLen    = "holdLen";     // longueur de la boucle du looper, de 30 ms à 4 s
+inline constexpr const char* holdQuant  = "holdQuant";   // longueur calée sur le tempo (divisions rythmiques)
+inline constexpr const char* holdMix    = "holdMix";     // boucle contre son d'origine, 0..1
 // Pitch
 inline constexpr const char* root       = "root";        // tonique 0..11
 inline constexpr const char* scale      = "scale";       // index dans kScales
@@ -25,7 +27,8 @@ inline constexpr const char* quantize   = "quantize";    // Tune calé sur la ga
 // Mod
 inline constexpr const char* lfoShape   = "lfoShape";    // 0..5
 inline constexpr const char* lfoSync    = "lfoSync";     // 0 = libre, sinon division du tempo
-inline constexpr const char* lfoRate    = "lfoRate";     // Hz en mode libre ; en mode sync : décalage de phase (0..1 cycle)
+inline constexpr const char* lfoRate    = "lfoRate";     // Hz (mode libre)
+inline constexpr const char* lfoPhase   = "lfoPhase";    // décalage de phase, 0..1 cycle (mode sync)
 inline constexpr const char* lfoDepth   = "lfoDepth";    // 0..1
 inline constexpr const char* lfoTarget  = "lfoTarget";   // 0 Tune, 1 Feedback, 2 Filter
 inline constexpr const char* drift      = "drift";       // 0..1
