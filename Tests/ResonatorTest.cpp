@@ -151,13 +151,13 @@ static double bandDb (const std::vector<float>& y, double f0, double f1, float f
     return s / k;
 }
 
-// Freeze : le son figé garde son niveau, ne dépend plus de l'entrée, sans point de bouclage audible
-static void testFreeze()
+// Freeze = looper à un seul lecteur : longueur exacte, raccord sans clic ni creux de niveau,
+// longueur modifiable en temps réel, fader de mix
+static void testLooper()
 {
     const float fs = 48000.0f;
     auto rms = [] (const std::vector<float>& v) { double s = 0; for (float x : v) s += (double) x * x; return (float) std::sqrt (s / (double) v.size()); };
-    // fluctuation du niveau : écart-type relatif de la valeur RMS par fenêtres de 20 ms
-    auto flutter = [&] (const std::vector<float>& v)
+    auto flutter = [&] (const std::vector<float>& v)   // écart-type relatif du niveau RMS par fenêtres de 20 ms
     {
         const size_t w = (size_t) (0.02f * fs); std::vector<double> r;
         for (size_t i = 0; i + w <= v.size(); i += w) { double s = 0; for (size_t k = 0; k < w; ++k) s += (double) v[i + k] * v[i + k]; r.push_back (std::sqrt (s / (double) w)); }
@@ -165,81 +165,142 @@ static void testFreeze()
         double q = 0; for (double x : r) q += (x - m) * (x - m);
         return (float) (std::sqrt (q / (double) r.size()) / m);
     };
-
-    // 1) pad : niveau, indépendance de l'entrée, stabilité, relâchement
-    for (float hl : { 0.0f, 0.5f, 1.0f })
-        for (float fb : { 0.3f, 0.95f })
+    // Un pas du plug-in : les réglages sont mis à jour tous les 16 échantillons
+    auto run = [] (Resonator& r, ResonatorParams& p, int count, auto&& input, std::vector<float>* out)
+    {
+        for (int i = 0; i < count; ++i)
         {
-            Resonator a, b; a.prepare (fs, 1u); b.prepare (fs, 1u);   // a : l'entrée continue ; b : entrée coupée
-            ResonatorParams p; p.semitones = 48.0f; p.feedback = fb; p.inputLpHz = 8000.0f; p.loopLpHz = 6000.0f; p.bbd = 0.3f; p.holdLen = hl;
-            a.update (p); b.update (p); a.reset(); b.reset();
-            float lp = 0.0f;
-            auto pad = [&] { lp += 0.05f * (0.3f * rnd() - lp); return lp * 4.0f; };
-            std::vector<float> win (48000);
-            for (int i = 0; i < 48000; ++i) { const float x = pad(); a.process (x); b.process (x); }
-            for (auto& v : win) { const float x = pad(); v = a.process (x); b.process (x); }
-            const float before = rms (win), flutLive = flutter (win);
-            p.freeze = 1.0f; a.update (p); b.update (p);
-            for (int i = 0; i < 4800; ++i) { const float x = pad(); a.process (x); b.process (0.0f); }
-            std::vector<float> wa (96000), wb (96000);
-            for (size_t i = 0; i < wa.size(); ++i) { wa[i] = a.process (pad()); wb[i] = b.process (0.0f); }
-            const float early = rms (wa), earlyB = rms (wb), flutFrozen = flutter (wa);
-            for (int i = 0; i < 48000 * 4; ++i) { a.process (pad()); b.process (0.0f); }
-            for (size_t i = 0; i < wa.size(); ++i) wa[i] = a.process (pad());
-            const float late = rms (wa);
-            const float dEarly = 20.0f * std::log10 (early / before), dDrift = 20.0f * std::log10 (late / early);
-            const float dIndep = 20.0f * std::log10 (earlyB / early);
-            std::printf ("freeze mem=%.1f fb=%.2f : niveau %+.1f dB ; derive %+.2f dB ; indep. entree %+.2f dB ; fluctuation %.2f (direct %.2f)\n",
-                         hl, fb, dEarly, dDrift, dIndep, flutFrozen, flutLive);
-            check (std::fabs (dEarly) < 2.5f, "freeze : niveau different de ce qu'on entendait");
-            check (std::fabs (dDrift) < 0.3f, "freeze : le niveau derive");
-            check (std::fabs (dIndep) < 0.3f, "freeze : la boucle depend encore de l'entree");
-            check (flutFrozen < 1.3f * flutLive + 0.05f, "freeze : pulsation de niveau audible (point de bouclage)");
-            p.freeze = 0.0f; a.update (p);
-            bool finite = true;
-            for (int i = 0; i < 48000; ++i) if (! std::isfinite (a.process (pad()))) finite = false;
-            check (finite, "freeze : valeur non finie au relachement");
+            if (i % 16 == 0) r.update (p);
+            const float y = r.process (input());
+            if (out) out->push_back (y);
         }
+    };
+    auto makePad = [] { float lp = 0.0f; return [lp]() mutable { lp += 0.05f * (0.3f * rnd() - lp); return lp * 4.0f; }; };
+    auto base = [] { ResonatorParams p; p.semitones = 48.0f; p.feedback = 0.7f; p.inputLpHz = 8000.0f; p.loopLpHz = 6000.0f; p.bbd = 0.3f; return p; };
+    auto silence = [] { return 0.0f; };
 
-    // 2) signal périodique : aucun saut au raccord, niveau constant
-    for (float hl : { 0.0f, 0.6f, 1.0f })
+    // 1) longueur exacte, boucle strictement périodique, niveau conservé, indépendante de l'entrée
     {
-        const double f0 = 440.0 * std::pow (2.0, (48.0 - 69.0) / 12.0);
-        Resonator r; r.prepare (fs);
-        ResonatorParams p; p.semitones = 48.0f; p.feedback = 0.9f; p.inputLpHz = 8000.0f; p.loopLpHz = 6000.0f; p.holdLen = hl;
-        r.update (p); r.reset();
-        auto tone = [&] (int i) { return (float) (0.3 * std::sin (2.0 * 3.14159265358979 * f0 * i / (double) fs)); };
-        int n = 0; float prev = 0.0f, maxLive = 0.0f, maxFrozen = 0.0f;
-        for (int i = 0; i < 96000; ++i) { const float y = r.process (tone (n++)); if (i > 48000) maxLive = std::max (maxLive, std::fabs (y - prev)); prev = y; }
-        p.freeze = 1.0f; r.update (p);
-        std::vector<float> fr (96000);
-        for (int i = 0; i < 4800; ++i) prev = r.process (tone (n++));
-        for (size_t i = 0; i < fr.size(); ++i) { const float y = r.process (tone (n++)); fr[i] = y; maxFrozen = std::max (maxFrozen, std::fabs (y - prev)); prev = y; }
-        const float fl = flutter (fr);
-        std::printf ("freeze periodique mem=%.1f : saut max en direct %.4f ; gele %.4f ; fluctuation %.3f\n", hl, maxLive, maxFrozen, fl);
-        check (maxFrozen < 1.3f * maxLive, "freeze : saut au raccord de la boucle");
-        check (fl < 0.05f, "freeze : le niveau pulse sur un signal periodique");
+        Resonator a, b; a.prepare (fs, 1u); b.prepare (fs, 1u);
+        auto p = base(); p.holdSeconds = 0.25f;
+        a.update (p); b.update (p); a.reset(); b.reset();
+        auto gen = makePad();
+        std::vector<float> src;                                    // même signal pour les deux résonateurs
+        for (int i = 0; i < 144000 + 96000; ++i) src.push_back (gen());
+        size_t k = 0; auto feed = [&] { return src[k++]; };
+        k = 0; run (a, p, 96000, feed, nullptr);
+        k = 0; run (b, p, 96000, feed, nullptr);
+        std::vector<float> before;
+        k = 96000; run (a, p, 48000, feed, &before);
+        k = 96000; run (b, p, 48000, feed, nullptr);
+        const float levelBefore = rms (before);
+        p.freeze = 1.0f;
+        k = 144000; run (a, p, 24000, feed, nullptr);              // a : l'entrée continue
+        run (b, p, 24000, silence, nullptr);                       // b : entrée coupée dès le gel
+        std::vector<float> ya, yb;
+        run (a, p, 72000, feed, &ya);
+        run (b, p, 72000, silence, &yb);
+        const int len = a.loopLength();
+        float maxErr = 0.0f;
+        for (size_t i = 0; i + (size_t) len < ya.size() && i < 24000; ++i) maxErr = std::max (maxErr, std::fabs (ya[i + (size_t) len] - ya[i]));
+        const float lvl = rms (ya), dB = 20.0f * std::log10 (lvl / levelBefore);
+        float dMax = 0.0f; for (size_t i = 0; i < ya.size(); ++i) dMax = std::max (dMax, std::fabs (ya[i] - yb[i]));
+        std::printf ("looper : longueur %d (attendu 12000) ; erreur de periodicite %.5f (niveau %.3f) ; niveau %+.1f dB ; ecart sans entree %.5f\n",
+                     len, maxErr, lvl, dB, dMax);
+        check (std::abs (len - 12000) <= 1, "looper : longueur inexacte");
+        check (maxErr < 0.03f * lvl, "looper : la boucle n'est pas periodique");
+        check (std::fabs (dB) < 3.0f, "looper : niveau different de ce qu'on entendait");
+        check (dMax < 0.001f, "looper : la boucle depend de l'entree");
+        p.freeze = 0.0f;
+        bool finite = true;
+        for (int i = 0; i < 48000; ++i) { if (i % 16 == 0) a.update (p); if (! std::isfinite (a.process (feed()))) finite = false; }
+        check (finite, "looper : valeur non finie au relachement");
     }
 
-    // 3) le son figé se joue : Tune +12 demi-tons = une octave plus haut
+    // 2) signal périodique, longueur sans rapport avec la période : la corrélation évite creux et clics
+    for (float secs : { 0.2347f, 0.5111f, 1.37f })
     {
         const double f0 = 440.0 * std::pow (2.0, (48.0 - 69.0) / 12.0);
         Resonator r; r.prepare (fs);
-        ResonatorParams p; p.semitones = 48.0f; p.feedback = 0.9f; p.inputLpHz = 8000.0f; p.loopLpHz = 12000.0f; p.holdLen = 0.4f;
+        auto p = base(); p.feedback = 0.9f; p.holdSeconds = secs;
         r.update (p); r.reset();
-        auto tone = [&] (int i) { return (float) (0.3 * std::sin (2.0 * 3.14159265358979 * f0 * i / (double) fs)); };
         int n = 0;
-        for (int i = 0; i < 96000; ++i) r.process (tone (n++));
-        p.freeze = 1.0f; r.update (p);
-        for (int i = 0; i < 9600; ++i) r.process (0.0f);
-        p.semitones = 60.0f; r.update (p);
-        for (int i = 0; i < 4800; ++i) r.process (0.0f);
-        std::vector<float> y (24000);
-        for (auto& v : y) v = r.process (0.0f);
-        const double pLow = dftPow (y, f0, fs), pHigh = dftPow (y, 2.0 * f0, fs);
-        std::printf ("freeze joue : puissance a f0 = %.5f ; a 2 x f0 = %.5f\n", pLow, pHigh);
-        check (pHigh > 10.0 * pLow, "freeze : la hauteur ne suit pas Tune");
+        auto tone = [&] { return (float) (0.3 * std::sin (2.0 * 3.14159265358979 * f0 * n++ / (double) fs)); };
+        std::vector<float> live, fr;
+        run (r, p, 192000, tone, nullptr); run (r, p, 48000, tone, &live);
+        p.freeze = 1.0f;
+        run (r, p, 14400, tone, nullptr);
+        run (r, p, (int) (fs * 3.0f * std::max (secs, 0.5f)), tone, &fr);
+        float maxLive = 0.0f, maxFr = 0.0f;
+        for (size_t i = 1; i < live.size(); ++i) maxLive = std::max (maxLive, std::fabs (live[i] - live[i - 1]));
+        for (size_t i = 1; i < fr.size(); ++i) maxFr = std::max (maxFr, std::fabs (fr[i] - fr[i - 1]));
+        const float fl = flutter (fr);
+        std::printf ("looper periodique %.4f s : saut max direct %.4f ; boucle %.4f ; fluctuation %.3f\n", secs, maxLive, maxFr, fl);
+        check (maxFr < 1.3f * maxLive, "looper : clic au raccord");
+        check (fl < 0.06f, "looper : creux de niveau au raccord");
     }
+
+    // 3) longueur modifiée en temps réel : fondu sans clic, nouvelle longueur exacte
+    {
+        Resonator r; r.prepare (fs);
+        auto p = base(); p.holdSeconds = 0.4f;
+        r.update (p); r.reset();
+        auto pad = makePad();
+        run (r, p, 144000, pad, nullptr);
+        p.freeze = 1.0f;
+        std::vector<float> y1, y2, y3;
+        run (r, p, 48000, silence, &y1);
+        float maxDiff1 = 0.0f; for (size_t i = 24000; i < y1.size(); ++i) maxDiff1 = std::max (maxDiff1, std::fabs (y1[i] - y1[i - 1]));
+        p.holdSeconds = 0.15f;                                 // 400 ms -> 150 ms en cours de lecture
+        run (r, p, 24000, silence, &y2);
+        p.holdSeconds = 0.25f;                                 // puis 250 ms
+        run (r, p, 48000, silence, &y3);
+        float maxDiff2 = 0.0f; bool finite = true;
+        for (float v : y2) if (! std::isfinite (v)) finite = false;
+        for (size_t i = 1; i < y2.size(); ++i) maxDiff2 = std::max (maxDiff2, std::fabs (y2[i] - y2[i - 1]));
+        const int len = r.loopLength();
+        float maxErr = 0.0f;
+        for (size_t i = 12000; i + (size_t) len < y3.size() && i < 30000; ++i) maxErr = std::max (maxErr, std::fabs (y3[i + (size_t) len] - y3[i]));
+        std::printf ("longueur en temps reel : saut max avant %.4f ; pendant le changement %.4f ; longueur finale %d (attendu 12000) ; periodicite %.5f\n",
+                     maxDiff1, maxDiff2, len, maxErr);
+        check (finite, "looper : valeur non finie pendant le changement de longueur");
+        check (maxDiff2 < 2.5f * maxDiff1, "looper : clic pendant le changement de longueur");
+        check (std::abs (len - 12000) <= 1, "looper : la nouvelle longueur n'est pas appliquee");
+        check (maxErr < 0.03f * rms (y3), "looper : boucle non periodique apres le changement");
+    }
+
+    // 4) fader de mix : 0 % = son d'origine exactement, 100 % = boucle seule
+    {
+        Resonator a, b, c; a.prepare (fs, 1u); b.prepare (fs, 1u); c.prepare (fs, 1u);
+        auto p = base(); p.holdSeconds = 0.25f; p.holdMix = 0.0f;
+        auto pb = base(); pb.holdSeconds = 0.25f;
+        auto pc = p; pc.holdMix = 1.0f;
+        a.update (p); b.update (pb); c.update (pc); a.reset(); b.reset(); c.reset();
+        std::vector<float> ya, yb, yc;
+        auto pad1 = makePad(); std::vector<float> src;
+        for (int i = 0; i < 96000; ++i) src.push_back (pad1());
+        size_t k = 0; auto feed = [&] { return src[k++ % src.size()]; };
+        k = 0; run (a, p, 96000, feed, nullptr);
+        k = 0; run (b, pb, 96000, feed, nullptr);
+        k = 0; run (c, pc, 96000, feed, nullptr);
+        p.freeze = 1.0f; pc.freeze = 1.0f;
+        k = 0; run (a, p, 48000, feed, &ya);
+        k = 0; run (b, pb, 48000, feed, &yb);
+        k = 0; run (c, pc, 48000, feed, &yc);
+        float d0 = 0.0f; for (size_t i = 0; i < ya.size(); ++i) d0 = std::max (d0, std::fabs (ya[i] - yb[i]));
+        float d1 = 0.0f; for (size_t i = 24000; i < yc.size(); ++i) d1 = std::max (d1, std::fabs (yc[i] - yb[i]));
+        std::printf ("mix du looper : 0 %% -> ecart avec le son d'origine %.6f ; 100 %% -> ecart %.4f\n", d0, d1);
+        check (d0 < 1.0e-6f, "looper : mix 0 % different du son d'origine");
+        check (d1 > 0.01f, "looper : mix 100 % identique au son d'origine");
+    }
+
+    // 5) quantification rythmique de la longueur
+    check (std::fabs (bbdres::quantizeHoldSeconds (0.26f, 120.0f) - 0.25f) < 1.0e-6f, "quantize : 0.26 s a 120 BPM -> 1/8");
+    check (std::fabs (bbdres::quantizeHoldSeconds (1.9f, 120.0f) - 2.0f) < 1.0e-6f, "quantize : 1.9 s a 120 BPM -> 1 mesure");
+    check (std::fabs (bbdres::quantizeHoldSeconds (3.1f, 60.0f) - 3.0f) < 1.0e-6f, "quantize : 3.1 s a 60 BPM -> 3 temps");
+    check (std::fabs (bbdres::quantizeHoldSeconds (0.1f, 120.0f) - 0.125f) < 1.0e-6f, "quantize : 0.1 s a 120 BPM -> 1/16");
+    check (std::fabs (bbdres::quantizeHoldSeconds (10.0f, 120.0f) - 4.0f) < 1.0e-6f, "quantize : borne a 4 s");
+    check (std::fabs (bbdres::holdSecondsFromSlider (0.0f) - 0.03f) < 1.0e-6f && std::fabs (bbdres::holdSecondsFromSlider (1.0f) - 4.0f) < 1.0e-4f, "curseur de longueur");
 }
 
 // Pas de clic quand le BBD quitte zéro (le filtre ne doit pas s'enclencher d'un coup)
@@ -416,7 +477,7 @@ int main()
     testStability (192000.0f, false);
     testCoupledStability (44100.0f);
     testCoupledStability (96000.0f);
-    testFreeze();
+    testLooper();
     testNoiseAndBbd();
     testBbdClick();
     for (float cr : { 0.25f, 0.5f, 1.0f })
