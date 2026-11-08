@@ -1,5 +1,6 @@
 #include "PluginProcessor.h"
 #include "Params.h"
+#include "PluginEditor.h"
 
 BBDResAudioProcessor::BBDResAudioProcessor()
     : AudioProcessor (BusesProperties()
@@ -449,7 +450,7 @@ void BBDResAudioProcessor::processBlock (juce::AudioBuffer<float>& buffer, juce:
 
 juce::AudioProcessorEditor* BBDResAudioProcessor::createEditor()
 {
-    return new juce::GenericAudioProcessorEditor (*this);
+    return new BBDResAudioProcessorEditor (*this);
 }
 
 void BBDResAudioProcessor::getStateInformation (juce::MemoryBlock& destData)
