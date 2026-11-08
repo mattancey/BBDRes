@@ -47,6 +47,19 @@ struct Biquad
         a1 = -2.0f * cw / a0;
         a2 = (1.0f - alpha) / a0;
     }
+    void setHighpass (float fc, float fs)
+    {
+        fc = std::clamp (fc, 10.0f, 0.45f * fs);
+        const float w0 = 2.0f * kPi * fc / fs;
+        const float cw = std::cos (w0), sw = std::sin (w0);
+        const float alpha = sw / (2.0f * 0.70710678f);
+        const float a0 = 1.0f + alpha;
+        b0 = (1.0f + cw) * 0.5f / a0;
+        b1 = -(1.0f + cw) / a0;
+        b2 = b0;
+        a1 = -2.0f * cw / a0;
+        a2 = (1.0f - alpha) / a0;
+    }
     float process (float x)
     {
         const float y = b0 * x + z1;
@@ -154,6 +167,8 @@ struct ResonatorParams
     float holdSeconds = 0.35f; // longueur de la boucle, en secondes (déjà quantifiée si besoin)
     float holdMix = 1.0f;      // 0..1 : boucle contre son d'origine
     float holdSpeedSemis = 0.0f; // petite variation de vitesse de lecture (dérive de la mémoire)
+    float holdHpHz = 20.0f;    // passe-haut 12 dB du looper uniquement (20 Hz = ouvert)
+    float holdLpHz = 20000.0f; // passe-bas 12 dB du looper uniquement (20 kHz = ouvert)
     float noiseGain = 1.0f;    // réglage interne : multiplicateur du souffle
     float jitterGain = 1.0f;   // réglage interne : multiplicateur du jitter d'horloge
 };
@@ -178,6 +193,7 @@ public:
     static constexpr float kFadeSeconds = 0.012f;      // fondu de raccord
     static constexpr float kSearchSeconds = 0.025f;    // fenêtre de recherche de la corrélation
     static constexpr float kLenChangeSeconds = 0.02f;  // intervalle minimal entre deux changements de longueur
+    static constexpr float kReleaseSeconds = 0.5f;     // fondu de sortie du looper (fixe)
 
     void prepare (float sampleRate, std::uint32_t seed = 1u)
     {
@@ -208,9 +224,9 @@ public:
     void reset()
     {
         delay.reset(); inLp.reset(); loop.reset(); dc.reset(); bw.reset(); jitterLp.reset(); lastLoop = 0.0f;
-        loopF.reset(); bwF.reset();
+        loopF.reset(); bwF.reset(); hpF.reset(); lpF.reset();
         std::fill (rec.begin(), rec.end(), 0.0f);
-        recW = 0; frozen = false; fzMix = 0.0f; xfLeft = 0; sinceLenChange = 0;
+        recW = 0; frozen = false; fzMix = 0.0f; relStep = 0.0f; xfLeft = 0; sinceLenChange = 0;
     }
 
     void update (const ResonatorParams& p)
@@ -265,6 +281,15 @@ public:
         delaySamples = std::clamp (fs / f0 - pd, 2.0f, maxDelay);
 
         // Looper
+        // Filtres du looper : deux filtres 12 dB indépendants (passe-haut puis passe-bas). Ils tournent toujours
+        // (coefficients seulement : l'état n'est jamais touché ici) ; leur dosage va de 0 (ouvert) à 1 sur la
+        // première octave, donc aucune coloration ni clic quand ils sont ouverts.
+        const float hpHz = std::clamp (p.holdHpHz, 20.0f, 20000.0f), lpHz = std::clamp (p.holdLpHz, 20.0f, 20000.0f);
+        hpAmt = std::clamp (std::log2 (hpHz / 20.0f), 0.0f, 1.0f);
+        lpAmt = std::clamp (std::log2 (20000.0f / lpHz), 0.0f, 1.0f);
+        hpF.setHighpass (hpHz, fs);
+        lpF.setLowpass (lpHz, fs);
+
         holdMix = std::clamp (p.holdMix, 0.0f, 1.0f);
         loopSpeed = std::exp2 (std::clamp (p.holdSpeedSemis, -2.0f, 2.0f) / 12.0f);
         targetLen = (int) std::lround (std::clamp (p.holdSeconds, kHoldMinSeconds, kHoldMaxSeconds) * fs);
@@ -272,7 +297,10 @@ public:
         if (wantFrozen && ! frozen)
             captureLoop();
         else if (! wantFrozen)
+        {
+            if (frozen) relStep = std::max (fzMix, 1.0e-3f) / (kReleaseSeconds * fs);   // release de 0,5 s, linéaire
             frozen = false;
+        }
         else if (sinceLenChange >= (int) (kLenChangeSeconds * fs)
                  && std::abs (targetLen - cur.L) > std::max (8, cur.L / 100))
         {
@@ -315,9 +343,16 @@ public:
         {
             float vf = loopF.process (loopSample());
             vf += (bwF.process (vf) - vf) * bwMix;
+            vf += (hpF.process (vf) - vf) * hpAmt;
+            vf += (lpF.process (vf) - vf) * lpAmt;
             out += (vf - v) * fzMix;
-            fzMix += ((frozen ? holdMix : 0.0f) - fzMix) * fzSlew;
-            if (! frozen && fzMix < 1.0e-4f) fzMix = 0.0f;
+            if (frozen)
+                fzMix += (holdMix - fzMix) * fzSlew;                // entrée rapide (30 ms)
+            else
+            {
+                fzMix -= relStep;                                    // sortie : rampe linéaire de 0,5 s
+                if (fzMix < 1.0e-4f) fzMix = 0.0f;
+            }
             ++sinceLenChange;
         }
         return out;
@@ -431,7 +466,7 @@ private:
         applyLength (targetLen, false);
         cur.p = (float) cur.S;
         xfLeft = 0;
-        loopF.reset(); bwF.reset();
+        loopF.reset(); bwF.reset(); hpF.reset(); lpF.reset();
         sinceLenChange = 0;
         frozen = true;
     }
@@ -458,7 +493,7 @@ private:
     float noiseAmp = 0.0f, jitterAmt = 0.0f, jitterNorm = 1.0f;
     std::uint32_t rng = 1u;
     DelayLine delay;
-    Biquad inLp, bw, bwF;
+    Biquad inLp, bw, bwF, hpF, lpF;
     OnePole loop, loopF, jitterLp;
     DcBlocker dc;
 
@@ -466,7 +501,7 @@ private:
     std::vector<float> rec, fzBuf;
     int recMask = 0, recW = 0, fzCap = 0, fadeSamples = 8, searchSamples = 0;
     bool frozen = false;
-    float fzMix = 0.0f, fzSlew = 0.001f, holdMix = 1.0f, loopSpeed = 1.0f;
+    float fzMix = 0.0f, fzSlew = 0.001f, holdMix = 1.0f, loopSpeed = 1.0f, relStep = 0.0f, hpAmt = 0.0f, lpAmt = 0.0f;
     int targetLen = 16000, sinceLenChange = 0, xfLeft = 0, xfLen = 1;
     Head cur, prevH;
 };
