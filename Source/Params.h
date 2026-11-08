@@ -20,6 +20,8 @@ inline constexpr const char* freeze     = "freeze";      // fige le son (hold)
 inline constexpr const char* holdLen    = "holdLen";     // longueur de la boucle du looper, de 30 ms à 4 s
 inline constexpr const char* holdQuant  = "holdQuant";   // longueur calée sur le tempo (divisions rythmiques)
 inline constexpr const char* holdMix    = "holdMix";     // boucle contre son d'origine, 0..1
+inline constexpr const char* holdHP     = "holdHP";      // passe-haut 12 dB du looper uniquement (20 Hz = ouvert)
+inline constexpr const char* holdLP     = "holdLP";      // passe-bas 12 dB du looper uniquement (20 kHz = ouvert)
 // Pitch
 inline constexpr const char* root       = "root";        // tonique 0..11
 inline constexpr const char* scale      = "scale";       // index dans kScales
