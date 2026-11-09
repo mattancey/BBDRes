@@ -34,6 +34,8 @@ target_sources(BBDResV2 PRIVATE
     Source/PluginEditor.cpp
     Source/UI/BBDLookAndFeel.h
     Source/UI/Widgets.h
+    Source/UI/Views.h
+    Source/Dsp/Response.h
     Source/Params.h
     Source/Dsp/Resonator.h
     Source/Dsp/Pitch.h
