@@ -328,6 +328,7 @@ void BBDResAudioProcessor::processBlock (juce::AudioBuffer<float>& buffer, juce:
                 }
         }
     }
+    uiBpm.store ((float) bpm);
     const float beatsPerCycle = bbdres::kSyncBeats[t.lfoSync];
 
     // Longueur du looper : libre, ou calée sur la division rythmique la plus proche du tempo de l'hôte
