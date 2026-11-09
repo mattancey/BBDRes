@@ -11,10 +11,10 @@ namespace bbdui
 class Knob : public juce::Component
 {
 public:
-    Knob (juce::AudioProcessorValueTreeState& apvts, const juce::String& paramID, const juce::String& labelText)
+    Knob (juce::AudioProcessorValueTreeState& apvts, const juce::String& paramID, const juce::String& labelText, int textWidth = 64)
     {
         slider.setSliderStyle (juce::Slider::RotaryHorizontalVerticalDrag);
-        slider.setTextBoxStyle (juce::Slider::TextBoxBelow, false, 64, 14);
+        slider.setTextBoxStyle (juce::Slider::TextBoxBelow, false, textWidth, 14);
         slider.setRotaryParameters (juce::MathConstants<float>::pi * 1.2f, juce::MathConstants<float>::pi * 2.8f, true);
         addAndMakeVisible (slider);
         name.setText (labelText, juce::dontSendNotification);
