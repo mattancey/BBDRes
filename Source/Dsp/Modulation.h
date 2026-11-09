@@ -92,19 +92,30 @@ inline float holdSecondsFromSlider (float x)
 // Longueur de boucle rythmique : durées en temps (noires), de la triple croche à 4 mesures
 inline constexpr float kHoldBeats[] = { 0.125f, 0.25f, 0.5f, 0.75f, 1.0f, 1.5f, 2.0f, 3.0f, 4.0f, 6.0f, 8.0f, 16.0f };
 
-// Durée rythmique la plus proche (en échelle logarithmique), comprise dans la mémoire du looper
-inline float quantizeHoldSeconds (float seconds, float bpm)
+inline constexpr const char* kHoldNames[] = { "1/32", "1/16", "1/8", "1/8.", "1/4", "1/4.", "1/2", "1/2.", "1 bar", "1.5 bars", "2 bars", "4 bars" };
+inline constexpr int kNumHold = (int) (sizeof (kHoldBeats) / sizeof (kHoldBeats[0]));
+
+// Index de la durée rythmique la plus proche (échelle logarithmique) comprise dans la mémoire du looper ; -1 si aucune
+inline int quantizeHoldIndex (float seconds, float bpm)
 {
     const float spb = 60.0f / std::max (bpm, 20.0f);
-    float best = std::clamp (seconds, kHoldMinSeconds, kHoldMaxSeconds), bestDist = 1.0e9f;
-    for (const float beats : kHoldBeats)
+    int best = -1;
+    float bestDist = 1.0e9f;
+    for (int i = 0; i < kNumHold; ++i)
     {
-        const float s = beats * spb;
+        const float s = kHoldBeats[i] * spb;
         if (s < kHoldMinSeconds || s > kHoldMaxSeconds) continue;
         const float dist = std::fabs (std::log (s / seconds));
-        if (dist < bestDist) { bestDist = dist; best = s; }
+        if (dist < bestDist) { bestDist = dist; best = i; }
     }
     return best;
+}
+
+inline float quantizeHoldSeconds (float seconds, float bpm)
+{
+    const int i = quantizeHoldIndex (seconds, bpm);
+    if (i < 0) return std::clamp (seconds, kHoldMinSeconds, kHoldMaxSeconds);
+    return kHoldBeats[i] * 60.0f / std::max (bpm, 20.0f);
 }
 
 // Phase (0..1) d'un LFO calé sur la position de l'hôte, exprimée en noires
