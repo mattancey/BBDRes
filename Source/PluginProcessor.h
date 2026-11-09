@@ -35,6 +35,7 @@ public:
     void setStateInformation (const void* data, int sizeInBytes) override;
 
     juce::AudioProcessorValueTreeState apvts;
+    std::atomic<float> uiBpm { 120.0f };   // tempo de l'hôte, lu par l'interface (affichage de la division)
 
 private:
     static juce::AudioProcessorValueTreeState::ParameterLayout createLayout();
