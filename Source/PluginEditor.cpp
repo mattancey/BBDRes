@@ -1,6 +1,7 @@
 #include "PluginEditor.h"
 #include "Params.h"
 #include "UI/Widgets.h"
+#include "UI/Views.h"
 
 namespace
 {
@@ -30,11 +31,19 @@ void panel (juce::Graphics& g, juce::Rectangle<int> r, const juce::String& title
     g.drawText (title, r.getX() + 12, r.getY() + 6, r.getWidth() - 24, 14, juce::Justification::centredLeft);
 }
 
-class Content : public juce::Component
+juce::String durationText (float seconds)
+{
+    return seconds < 1.0f ? juce::String (juce::roundToInt (seconds * 1000.0f)) + " ms" : juce::String (seconds, 2) + " s";
+}
+
+class Content : public juce::Component, private juce::Timer
 {
 public:
-    explicit Content (juce::AudioProcessorValueTreeState& a)
+    explicit Content (BBDResAudioProcessor& p) : proc (p)
     {
+        auto& a = proc.apvts;
+        holdQuantP = a.getRawParameterValue (ParamIDs::holdQuant);
+
         // --- Input ---
         add<Knob> (a, ParamIDs::drive, "DRIVE").setBounds (28, 98, 64, 88);
         add<ChoiceBox> (a, ParamIDs::driveCurve, "CURVE").setBounds (108, 116, 76, 42);
@@ -44,6 +53,7 @@ public:
         add<ChoiceBox> (a, ParamIDs::root, "ROOT").setBounds (28, 232, 70, 42);
         add<ChoiceBox> (a, ParamIDs::scale, "SCALE").setBounds (104, 232, 100, 42);
         add<ToggleBox> (a, ParamIDs::quantize, "QUANT").setBounds (212, 232, 62, 28);
+        add<KeyboardView> (a).setBounds (28, 284, 246, 60);
 
         // --- Resonator ---
         add<Knob> (a, ParamIDs::tune, "TUNE").setBounds (310, 104, 120, 150);
@@ -53,6 +63,7 @@ public:
         add<Knob> (a, ParamIDs::loopDyn, "LOOP DYN").setBounds (672, 130, 64, 88);
         add<Knob> (a, ParamIDs::bbd, "BBD").setBounds (760, 130, 64, 88);
         add<Knob> (a, ParamIDs::noise, "NOISE").setBounds (832, 130, 64, 88);
+        add<ResponseView> (a, proc).setBounds (310, 272, 630, 210);
 
         // --- Mod ---
         add<ChoiceBox> (a, ParamIDs::lfoShape, "SHAPE").setBounds (976, 100, 92, 42);
@@ -73,9 +84,10 @@ public:
 
         // --- Hold (looper) ---
         add<ToggleBox> (a, ParamIDs::freeze, "FREEZE").setBounds (30, 640, 110, 52);
-        add<Knob> (a, ParamIDs::holdLen, "LENGTH").setBounds (160, 626, 64, 88);
-        add<ToggleBox> (a, ParamIDs::holdQuant, "QUANT").setBounds (240, 650, 64, 28);
-        add<Knob> (a, ParamIDs::holdMix, "HOLD MIX").setBounds (320, 626, 64, 88);
+        lengthKnob = &add<Knob> (a, ParamIDs::holdLen, "LENGTH", 92);
+        lengthKnob->setBounds (148, 626, 92, 88);
+        add<ToggleBox> (a, ParamIDs::holdQuant, "QUANT").setBounds (250, 650, 62, 28);
+        add<Knob> (a, ParamIDs::holdMix, "HOLD MIX").setBounds (326, 626, 64, 88);
         add<BandSlider> (a, ParamIDs::holdHP, ParamIDs::holdLP).setBounds (410, 640, 570, 56);
 
         // --- Output ---
@@ -84,6 +96,21 @@ public:
 
         syncBox->combo.onChange = [this] { updateLfoKnobs(); };
         updateLfoKnobs();
+
+        // Length : avec Quantize, le texte montre la division rythmique réellement utilisée (ex. « 1/8  250 ms »)
+        lengthKnob->slider.textFromValueFunction = [this] (double v)
+        {
+            const float sec = bbdres::holdSecondsFromSlider ((float) v);
+            if (holdQuantP->load() <= 0.5f)
+                return durationText (sec);
+            const float bpm = proc.uiBpm.load();
+            const int idx = bbdres::quantizeHoldIndex (sec, bpm);
+            if (idx < 0)
+                return durationText (sec);
+            return juce::String (bbdres::kHoldNames[idx]) + "  " + durationText (bbdres::kHoldBeats[idx] * 60.0f / std::max (bpm, 20.0f));
+        };
+        lengthKnob->slider.updateText();
+        startTimerHz (10);
     }
 
     void paint (juce::Graphics& g) override
@@ -109,10 +136,6 @@ public:
         dashedBox (g, { 16.0f, 384.0f, 270.0f, 212.0f }, u8 ("RÉSERVÉ - NOUVELLES FONCTIONS"));
         dashedBox (g, { 964.0f, 400.0f, 300.0f, 196.0f }, u8 ("RÉSERVÉ"));
         dashedBox (g, { 16.0f, 738.0f, 1248.0f, 26.0f }, u8 ("SÉQUENCEUR DE PITCH : tiroir replié (v3)"));
-
-        // Emplacements des widgets de l'étape 2
-        dashedBox (g, { 28.0f, 284.0f, 246.0f, 60.0f }, "CLAVIER DE GAMME - etape 2");
-        dashedBox (g, { 310.0f, 272.0f, 630.0f, 210.0f }, u8 ("COURBE DE RÉPONSE - etape 2"));
 
         // Résonateurs (le deuxième est pour plus tard)
         g.setColour (kAmber);
@@ -145,10 +168,28 @@ private:
         phaseKnob->setVisible (! freeRunning);
     }
 
+    // Le texte de Length dépend du tempo de l'hôte et de Quantize : on le rafraîchit quand ils changent
+    void timerCallback() override
+    {
+        const float bpm = proc.uiBpm.load();
+        const bool quant = holdQuantP->load() > 0.5f;
+        if (quant != lastQuant || std::abs (bpm - lastBpm) > 0.05f)
+        {
+            lastQuant = quant;
+            lastBpm = bpm;
+            lengthKnob->slider.updateText();
+        }
+    }
+
+    BBDResAudioProcessor& proc;
     std::vector<std::unique_ptr<juce::Component>> owned;
     ChoiceBox* syncBox = nullptr;
     Knob* rateKnob = nullptr;
     Knob* phaseKnob = nullptr;
+    Knob* lengthKnob = nullptr;
+    std::atomic<float>* holdQuantP = nullptr;
+    float lastBpm = 120.0f;
+    bool lastQuant = false;
 };
 } // namespace
 
@@ -156,7 +197,7 @@ BBDResAudioProcessorEditor::BBDResAudioProcessorEditor (BBDResAudioProcessor& p)
     : juce::AudioProcessorEditor (p), proc (p)
 {
     setLookAndFeel (&laf);
-    content = std::make_unique<Content> (proc.apvts);
+    content = std::make_unique<Content> (proc);
     addAndMakeVisible (*content);
 
     constrainer.setFixedAspectRatio ((double) kDesignW / (double) kDesignH);
