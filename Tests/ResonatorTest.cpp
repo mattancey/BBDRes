@@ -2,7 +2,9 @@
 #include "../Source/Dsp/Resonator.h"
 #include "../Source/Dsp/Pitch.h"
 #include "../Source/Dsp/Modulation.h"
+#include "../Source/Dsp/Response.h"
 #include <cstdio>
+#include <string>
 #include <cstdlib>
 
 using bbdres::Resonator;
@@ -300,6 +302,7 @@ static void testLooper()
     check (std::fabs (bbdres::quantizeHoldSeconds (3.1f, 60.0f) - 3.0f) < 1.0e-6f, "quantize : 3.1 s a 60 BPM -> 3 temps");
     check (std::fabs (bbdres::quantizeHoldSeconds (0.1f, 120.0f) - 0.125f) < 1.0e-6f, "quantize : 0.1 s a 120 BPM -> 1/16");
     check (std::fabs (bbdres::quantizeHoldSeconds (10.0f, 120.0f) - 4.0f) < 1.0e-6f, "quantize : borne a 4 s");
+    check (bbdres::quantizeHoldIndex (0.26f, 120.0f) == 2 && std::string (bbdres::kHoldNames[2]) == "1/8", "quantize : nom de la division");
     check (std::fabs (bbdres::holdSecondsFromSlider (0.0f) - 0.03f) < 1.0e-6f && std::fabs (bbdres::holdSecondsFromSlider (1.0f) - 4.0f) < 1.0e-4f, "curseur de longueur");
 }
 
@@ -407,6 +410,40 @@ static void testHoldFilter()
     float dmax = 0.0f;
     for (int i = 0; i < 48000; ++i) { if (i % 16 == 0) { a.update (pa); b.update (pb); } dmax = std::max (dmax, std::fabs (a.process (src[(size_t) i]) - b.process (src[(size_t) i]))); }
     check (dmax == 0.0f, "les filtres du looper modifient le son direct");
+}
+
+// La courbe de l'interface (modèle analytique) doit coller à la réponse mesurée du vrai résonateur
+static void testResponseModel()
+{
+    const float fs = 48000.0f;
+    struct Cfg { float note, fb, inLp, loopLp, bbd; };
+    double worstAll = 0.0;
+    for (Cfg c : { Cfg { 48.0f, 0.7f, 8000.0f, 6000.0f, 0.3f }, Cfg { 60.0f, 0.9f, 12000.0f, 12000.0f, 0.6f }, Cfg { 36.0f, 0.5f, 5000.0f, 3000.0f, 0.0f } })
+    {
+        Resonator r; r.prepare (fs);
+        ResonatorParams p; p.semitones = c.note; p.feedback = c.fb; p.inputLpHz = c.inLp; p.loopLpHz = c.loopLp; p.bbd = c.bbd;
+        p.noiseGain = 0.0f; p.jitterGain = 0.0f;
+        r.update (p); r.reset();
+        const int n = 96000;
+        std::vector<float> y ((size_t) n);
+        for (int i = 0; i < n; ++i) y[(size_t) i] = r.process (i == 0 ? 0.001f : 0.0f);   // impulsion faible : régime linéaire
+
+        bbdres::ResponseParams rp; rp.semitones = c.note; rp.feedback = c.fb; rp.inputLpHz = c.inLp; rp.loopLpHz = c.loopLp; rp.bbd = c.bbd; rp.fs = fs;
+        bbdres::ResponseModel m; m.set (rp);
+        const double f0 = (double) m.fundamentalHz();
+        double worst = 0.0;
+        for (double mult : { 1.0, 2.0, 3.5, 5.0, 7.5, 12.0 })
+        {
+            const double f = f0 * mult;
+            if (f > 9000.0) continue;
+            const double meas = 10.0 * std::log10 (dftPow (y, f, fs) * n + 1e-30) + 60.0;   // impulsion de 0,001
+            const double model = (double) m.db ((float) f);
+            worst = std::max (worst, std::fabs (meas - model));
+        }
+        std::printf ("courbe : note %.0f fb %.1f bbd %.1f -> ecart max modele/mesure = %.2f dB\n", c.note, c.fb, c.bbd, worst);
+        worstAll = std::max (worstAll, worst);
+    }
+    check (worstAll < 1.5, "la courbe de l'interface ne colle pas a la reponse reelle (1,5 dB)");
 }
 
 // Pas de clic quand le BBD quitte zéro (le filtre ne doit pas s'enclencher d'un coup)
@@ -586,6 +623,7 @@ int main()
     testLooper();
     testRelease();
     testHoldFilter();
+    testResponseModel();
     testNoiseAndBbd();
     testBbdClick();
     for (float cr : { 0.25f, 0.5f, 1.0f })
