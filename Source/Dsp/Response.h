@@ -17,6 +17,8 @@ struct ResponseParams
     float inputLpHz = 8000.0f;
     float loopLpHz = 12000.0f;
     float bbd = 0.0f;
+    float lowCutHz = 80.0f;
+    float lowCutAmt = 0.0f;
     float fs = 48000.0f;
 };
 
@@ -38,10 +40,14 @@ public:
         bw.setLowpass (std::min (0.2f * R * f0, 0.45f * fs), fs);
         bwMix = std::clamp (bbdAmt * 20.0f, 0.0f, 1.0f);
 
+        lowF.setCutoff (p.lowCutHz, fs);
+        lowAmt = std::clamp (p.lowCutAmt, 0.0f, 1.0f);
+
         // Même compensation de phase que le résonateur : la boucle est accordée sur f0
         const float w = 2.0f * kPi * f0 / fs;
         const std::complex<float> h = (1.0f - bwMix) + bwMix * bw.response (f0, fs);
-        const float pd = loop.phaseDelay (f0, fs) - std::arg (h) / w;
+        const std::complex<float> lp1 = (1.0f - lowF.a) / (1.0f - lowF.a * std::polar (1.0f, -w));
+        const float pd = loop.phaseDelay (f0, fs) - std::arg (h) / w - std::arg (1.0f - lowAmt * lp1) / w;
         delaySamples = std::clamp (fs / f0 - pd, 2.0f, 1.0e6f);
     }
 
@@ -52,15 +58,16 @@ public:
     {
         const float w = 2.0f * kPi * f / fs;
         const std::complex<float> lp = (1.0f - loop.a) / (1.0f - loop.a * std::polar (1.0f, -w));
-        const std::complex<float> b = lp * ((1.0f - bwMix) + bwMix * bw.response (f, fs));
+        const std::complex<float> low = 1.0f - lowAmt * ((1.0f - lowF.a) / (1.0f - lowF.a * std::polar (1.0f, -w)));
+        const std::complex<float> b = lp * ((1.0f - bwMix) + bwMix * bw.response (f, fs)) * low;
         const std::complex<float> z = std::polar (1.0f, -w * delaySamples);
         const std::complex<float> h = inGain * inLp.response (f, fs) * b * z / (1.0f - g * b * z);
         return 20.0f * std::log10 (std::max (std::abs (h), 1.0e-6f));
     }
 
 private:
-    float fs = 48000.0f, f0 = 130.0f, g = 0.0f, inGain = 1.0f, bwMix = 0.0f, delaySamples = 100.0f;
-    OnePole loop;
+    float fs = 48000.0f, f0 = 130.0f, g = 0.0f, inGain = 1.0f, bwMix = 0.0f, delaySamples = 100.0f, lowAmt = 0.0f;
+    OnePole loop, lowF;
     Biquad inLp, bw;
 };
 } // namespace bbdres
