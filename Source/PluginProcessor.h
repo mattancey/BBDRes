@@ -36,6 +36,7 @@ public:
 
     juce::AudioProcessorValueTreeState apvts;
     std::atomic<float> uiBpm { 120.0f };   // tempo de l'hôte, lu par l'interface (affichage de la division)
+    std::atomic<float> uiPitch { 48.0f };  // hauteur réelle du résonateur (LFO, quantification), lue par l'interface
 
 private:
     static juce::AudioProcessorValueTreeState::ParameterLayout createLayout();
@@ -44,7 +45,7 @@ private:
     struct Targets
     {
         float tune, fine, feedback, inLog2, loopLog2, mix, level, drive, bbd, noise;
-        float lfoRate, lfoOffset, lfoDepth, loopDyn, drift, spread, cross, holdLen, holdMix, holdHpLog2, holdLpLog2;
+        float lfoRate, lfoOffset, lfoDepth, loopDyn, drift, spread, cross, holdLen, holdMix, holdHpLog2, holdLpLog2, lowCutLog2, pultec;
         int curve, root, scale, lfoShape, lfoTarget, lfoSync;
         bool quantize, freeze, holdQuant;
     };
@@ -70,6 +71,8 @@ private:
     std::atomic<float>* holdMixP = nullptr;
     std::atomic<float>* holdHpP = nullptr;
     std::atomic<float>* holdLpP = nullptr;
+    std::atomic<float>* lowCutP = nullptr;
+    std::atomic<float>* pultecP = nullptr;
     std::atomic<float>* lfoPhaseP = nullptr;
     std::atomic<float>* rootP = nullptr;
     std::atomic<float>* scaleP = nullptr;
@@ -88,7 +91,7 @@ private:
 
     bbdres::Resonator resonators[2];
     bbdres::Smoother tuneSm, fbSm, inSm, loopSm, mixSm, levelSm, driveSm, bbdSm,
-                     noiseSm, spreadSm, crossSm, holdHpSm, holdLpSm;
+                     noiseSm, spreadSm, crossSm, holdHpSm, holdLpSm, lowCutSm, pultecSm;
     bbdres::Lfo lfo, driftTuneLfo[2], driftFilterLfo[2];
     bbdres::EnvFollower env;
     float mixPrev = 0.5f, levelPrev = 1.0f;
