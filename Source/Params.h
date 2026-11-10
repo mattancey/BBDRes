@@ -13,6 +13,8 @@ inline constexpr const char* tune       = "tune";        // note MIDI (C3 = 60)
 inline constexpr const char* fine       = "fine";        // accord fin, en cents
 inline constexpr const char* feedback   = "feedback";    // 0..1
 inline constexpr const char* loopLP     = "loopLP";      // filtre de boucle 6 dB, Hz
+inline constexpr const char* lowCut     = "lowCut";      // atténuateur de graves de la boucle : fréquence (20..600 Hz)
+inline constexpr const char* pultec     = "pultec";      // 0 = SOFT (transparent) ... 1 = HP 6 dB
 inline constexpr const char* loopDyn    = "loopDyn";     // -1..+1 : l'entrée ouvre/ferme le filtre de boucle
 inline constexpr const char* bbd        = "bbd";         // caractère BBD 0..1 (bande passante + grain)
 inline constexpr const char* noise      = "noise";       // souffle 0..1
