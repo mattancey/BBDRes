@@ -2,6 +2,7 @@
 #include "Params.h"
 #include "UI/Widgets.h"
 #include "UI/Views.h"
+#include "UI/StepGrid.h"
 
 namespace
 {
@@ -93,6 +94,14 @@ public:
         add<Knob> (a, ParamIDs::holdMix, "HOLD MIX").setBounds (326, 626, 64, 88);
         add<BandSlider> (a, ParamIDs::holdHP, ParamIDs::holdLP).setBounds (410, 640, 570, 56);
 
+        // --- Séquenceur de pitch ---
+        add<ToggleBox> (a, ParamIDs::seqOn, "SEQ").setBounds (30, 772, 80, 44);
+        add<Knob> (a, ParamIDs::seqLength, "STEPS").setBounds (124, 758, 64, 88);
+        add<ChoiceBox> (a, ParamIDs::seqStep, "STEP").setBounds (200, 772, 100, 42);
+        add<ToggleBox> (a, ParamIDs::seqQuant, "Q SCALE").setBounds (310, 776, 64, 32);
+        add<Knob> (a, ParamIDs::seqGlide, "GLIDE").setBounds (382, 758, 64, 88);
+        add<StepGrid> (a, proc).setBounds (456, 748, 800, 112);
+
         // --- Output ---
         add<Knob> (a, ParamIDs::mix, "MIX").setBounds (1030, 626, 64, 88);
         add<Knob> (a, ParamIDs::outLevel, "LEVEL").setBounds (1120, 626, 64, 88);
@@ -145,11 +154,11 @@ public:
         panel (g, { 964, 270, 300, 118 }, "STEREO");
         panel (g, { 16, 608, 986, 118 }, "HOLD - LOOPER");
         panel (g, { 1014, 608, 250, 118 }, "OUTPUT");
+        panel (g, { 16, 738, 1248, 128 }, "SEQUENCEUR DE PITCH");
 
         // Zones réservées pour les fonctions à venir
         dashedBox (g, { 16.0f, 384.0f, 270.0f, 212.0f }, u8 ("RÉSERVÉ - NOUVELLES FONCTIONS"));
         dashedBox (g, { 964.0f, 400.0f, 300.0f, 196.0f }, u8 ("RÉSERVÉ"));
-        dashedBox (g, { 16.0f, 738.0f, 1248.0f, 26.0f }, u8 ("SÉQUENCEUR DE PITCH : tiroir replié (v3)"));
 
         // Résonateurs (le deuxième est pour plus tard)
         g.setColour (kAmber);
