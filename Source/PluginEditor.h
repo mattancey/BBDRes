@@ -16,7 +16,7 @@ public:
 
 private:
     static constexpr int kDesignW = 1280;
-    static constexpr int kDesignH = 780;
+    static constexpr int kDesignH = 882;
 
     bbdui::BBDLookAndFeel laf;
     juce::ComponentBoundsConstrainer constrainer;
