@@ -26,6 +26,8 @@ BBDResAudioProcessor::BBDResAudioProcessor()
     holdMixP   = apvts.getRawParameterValue (ParamIDs::holdMix);
     holdHpP    = apvts.getRawParameterValue (ParamIDs::holdHP);
     holdLpP    = apvts.getRawParameterValue (ParamIDs::holdLP);
+    lowCutP    = apvts.getRawParameterValue (ParamIDs::lowCut);
+    pultecP    = apvts.getRawParameterValue (ParamIDs::pultec);
     lfoPhaseP  = apvts.getRawParameterValue (ParamIDs::lfoPhase);
     rootP      = apvts.getRawParameterValue (ParamIDs::root);
     scaleP     = apvts.getRawParameterValue (ParamIDs::scale);
@@ -110,6 +112,20 @@ juce::AudioProcessorValueTreeState::ParameterLayout BBDResAudioProcessor::create
     layout.add (std::make_unique<juce::AudioParameterFloat> (
         juce::ParameterID { ParamIDs::loopDyn, 1 }, "Loop Dyn",
         Range (-1.0f, 1.0f, 0.001f), 0.0f, Attr().withStringFromValueFunction (percent)));
+
+    // Atténuateur de graves de la boucle : fréquence et profondeur (SOFT = transparent ... HP = passe-haut 6 dB)
+    layout.add (std::make_unique<juce::AudioParameterFloat> (
+        juce::ParameterID { ParamIDs::lowCut, 1 }, "Low Cut",
+        Range (20.0f, 600.0f, 0.0f, 0.37f), 80.0f, Attr().withStringFromValueFunction (hz)));
+
+    layout.add (std::make_unique<juce::AudioParameterFloat> (
+        juce::ParameterID { ParamIDs::pultec, 1 }, "Pultec",
+        Range (0.0f, 1.0f, 0.001f), 0.0f, Attr().withStringFromValueFunction ([] (float v, int)
+        {
+            if (v <= 0.001f) return juce::String ("SOFT");
+            if (v >= 0.999f) return juce::String ("HP-6dB");
+            return juce::String (juce::roundToInt (v * 100.0f)) + " %";
+        })));
 
     layout.add (std::make_unique<juce::AudioParameterFloat> (
         juce::ParameterID { ParamIDs::bbd, 1 }, "BBD",
@@ -219,6 +235,8 @@ BBDResAudioProcessor::Targets BBDResAudioProcessor::readTargets() const
     t.lfoOffset = lfoPhaseP->load();          // décalage de phase du LFO en mode sync (mémorisé à part de Rate)
     t.holdLen   = holdLenP->load();
     t.holdMix   = holdMixP->load();
+    t.lowCutLog2 = std::log2 (lowCutP->load());
+    t.pultec     = pultecP->load();
     t.holdHpLog2 = std::log2 (holdHpP->load());
     t.holdLpLog2 = std::log2 (holdLpP->load());
     t.holdQuant = holdQuantP->load() > 0.5f;
@@ -260,6 +278,8 @@ void BBDResAudioProcessor::prepareToPlay (double sampleRate, int)
     spreadSm.prepare (controlRate, 0.05f);
     crossSm.prepare (controlRate, 0.05f);
     holdHpSm.prepare (controlRate, 0.02f);
+    lowCutSm.prepare (controlRate, 0.02f);
+    pultecSm.prepare (controlRate, 0.02f);
     holdLpSm.prepare (controlRate, 0.02f);
 
     lfo.prepare (controlRate, 11u);
@@ -283,6 +303,8 @@ void BBDResAudioProcessor::prepareToPlay (double sampleRate, int)
     spreadSm.snap (t.spread);
     crossSm.snap (t.cross);
     holdHpSm.snap (t.holdHpLog2);
+    lowCutSm.snap (t.lowCutLog2);
+    pultecSm.snap (t.pultec);
     holdLpSm.snap (t.holdLpLog2);
     mixPrev = t.mix;
     levelPrev = t.level;
@@ -397,6 +419,7 @@ void BBDResAudioProcessor::processBlock (juce::AudioBuffer<float>& buffer, juce:
 
         // --- Lissage ---
         const float semisSm = tuneSm.next (juce::jlimit (18.0f, 114.0f, semisTarget));
+        uiPitch.store (semisSm);                       // pour le clavier de l'interface
         const float loopSmV = loopSm.next (loopTarget);
         const float spreadSemis = spreadSm.next (t.spread) * 1.0f;   // désaccord total : jusqu'à 100 cents (+/- 50 par canal)
         const float spreadHalf = numCh > 1 ? spreadSemis * 0.5f : 0.0f;
@@ -408,6 +431,8 @@ void BBDResAudioProcessor::processBlock (juce::AudioBuffer<float>& buffer, juce:
         rp.curve     = t.curve;
         rp.bbd       = bbdSm.next (t.bbd);
         rp.holdHpHz  = std::exp2 (holdHpSm.next (t.holdHpLog2));
+        rp.lowCutHz  = std::exp2 (lowCutSm.next (t.lowCutLog2));
+        rp.lowCutAmt = pultecSm.next (t.pultec);
         rp.holdLpHz  = std::exp2 (holdLpSm.next (t.holdLpLog2));
         rp.noise     = noiseSm.next (t.noise);
         rp.freeze    = t.freeze ? 1.0f : 0.0f;   // front montant = fige le son
