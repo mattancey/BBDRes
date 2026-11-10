@@ -169,6 +169,8 @@ struct ResonatorParams
     float holdSpeedSemis = 0.0f; // petite variation de vitesse de lecture (dérive de la mémoire)
     float holdHpHz = 20.0f;    // passe-haut 12 dB du looper uniquement (20 Hz = ouvert)
     float holdLpHz = 20000.0f; // passe-bas 12 dB du looper uniquement (20 kHz = ouvert)
+    float lowCutHz = 80.0f;    // atténuateur de graves « Pultec » dans la boucle : fréquence
+    float lowCutAmt = 0.0f;    // 0 = transparent (SOFT) ... 1 = passe-haut 6 dB (HP)
     float noiseGain = 1.0f;    // réglage interne : multiplicateur du souffle
     float jitterGain = 1.0f;   // réglage interne : multiplicateur du jitter d'horloge
 };
@@ -224,7 +226,7 @@ public:
     void reset()
     {
         delay.reset(); inLp.reset(); loop.reset(); dc.reset(); bw.reset(); jitterLp.reset(); lastLoop = 0.0f;
-        loopF.reset(); bwF.reset(); hpF.reset(); lpF.reset();
+        loopF.reset(); bwF.reset(); hpF.reset(); lpF.reset(); lowF.reset();
         std::fill (rec.begin(), rec.end(), 0.0f);
         recW = 0; frozen = false; fzMix = 0.0f; relStep = 0.0f; xfLeft = 0; sinceLenChange = 0;
     }
@@ -264,6 +266,16 @@ public:
         {
             const std::complex<float> h = (1.0f - bwMix) + bwMix * bw.response (f0, fs);
             pd += -std::arg (h) / w;
+        }
+        // Atténuateur de graves « Pultec » dans la boucle : sortie = v - amt * LP(v).
+        // amt = 1 : passe-haut 6 dB. amt < 1 : plateau d'atténuation des graves, de plus en plus doux
+        // (gain en continu = 1 - amt). Il tourne toujours (état chaud) : à 0 il est exactement transparent.
+        // Phase compensée comme les autres filtres de la boucle : l'accord ne bouge pas.
+        lowF.setCutoff (p.lowCutHz, fs);
+        lowAmt = std::clamp (p.lowCutAmt, 0.0f, 1.0f);
+        {
+            const std::complex<float> lp1 = (1.0f - lowF.a) / (1.0f - lowF.a * std::polar (1.0f, -w));
+            pd += -std::arg (1.0f - lowAmt * lp1) / w;
         }
         const float nz = std::clamp (p.noise, 0.0f, 1.0f);
         noiseAmp = 0.0025f * nz * nz * p.noiseGain;      // souffle injecté dans la ligne BBD
@@ -332,6 +344,7 @@ public:
 
         float v = loop.process (raw);
         v += (bw.process (v) - v) * bwMix;
+        v -= lowAmt * lowF.process (v);          // atténuateur de graves de la boucle
         lastLoop = v;
         const float vm = (1.0f - crossAmt) * v + crossAmt * crossV;
         const float y = in + std::tanh (loopGain * vm);  // saturation douce dans la boucle
@@ -494,14 +507,14 @@ private:
     std::uint32_t rng = 1u;
     DelayLine delay;
     Biquad inLp, bw, bwF, hpF, lpF;
-    OnePole loop, loopF, jitterLp;
+    OnePole loop, loopF, jitterLp, lowF;
     DcBlocker dc;
 
     // Looper
     std::vector<float> rec, fzBuf;
     int recMask = 0, recW = 0, fzCap = 0, fadeSamples = 8, searchSamples = 0;
     bool frozen = false;
-    float fzMix = 0.0f, fzSlew = 0.001f, holdMix = 1.0f, loopSpeed = 1.0f, relStep = 0.0f, hpAmt = 0.0f, lpAmt = 0.0f;
+    float fzMix = 0.0f, fzSlew = 0.001f, holdMix = 1.0f, loopSpeed = 1.0f, relStep = 0.0f, hpAmt = 0.0f, lpAmt = 0.0f, lowAmt = 0.0f;
     int targetLen = 16000, sinceLenChange = 0, xfLeft = 0, xfLen = 1;
     Head cur, prevH;
 };
