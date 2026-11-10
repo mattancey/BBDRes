@@ -28,6 +28,16 @@ BBDResAudioProcessor::BBDResAudioProcessor()
     holdLpP    = apvts.getRawParameterValue (ParamIDs::holdLP);
     lowCutP    = apvts.getRawParameterValue (ParamIDs::lowCut);
     pultecP    = apvts.getRawParameterValue (ParamIDs::pultec);
+    seqOnP     = apvts.getRawParameterValue (ParamIDs::seqOn);
+    seqLengthP = apvts.getRawParameterValue (ParamIDs::seqLength);
+    seqStepP   = apvts.getRawParameterValue (ParamIDs::seqStep);
+    seqQuantP  = apvts.getRawParameterValue (ParamIDs::seqQuant);
+    seqGlideP  = apvts.getRawParameterValue (ParamIDs::seqGlide);
+    for (int i = 0; i < bbdres::kMaxSeqSteps; ++i)
+    {
+        stepP[i]   = apvts.getRawParameterValue (ParamIDs::kStepIDs[i]);
+        stepOnP[i] = apvts.getRawParameterValue (ParamIDs::kStepOnIDs[i]);
+    }
     lfoPhaseP  = apvts.getRawParameterValue (ParamIDs::lfoPhase);
     rootP      = apvts.getRawParameterValue (ParamIDs::root);
     scaleP     = apvts.getRawParameterValue (ParamIDs::scale);
@@ -206,6 +216,40 @@ juce::AudioProcessorValueTreeState::ParameterLayout BBDResAudioProcessor::create
         juce::ParameterID { ParamIDs::cross, 1 }, "Cross",
         Range (0.0f, 1.0f, 0.001f), 0.0f, Attr().withStringFromValueFunction (percent)));
 
+    // --- Séquenceur de pitch ---
+    layout.add (std::make_unique<juce::AudioParameterBool> (
+        juce::ParameterID { ParamIDs::seqOn, 1 }, "Seq On", false));
+
+    layout.add (std::make_unique<juce::AudioParameterInt> (
+        juce::ParameterID { ParamIDs::seqLength, 1 }, "Seq Length", 1, bbdres::kMaxSeqSteps, 8));
+
+    juce::StringArray seqStepNames;
+    for (const auto& d : bbdres::kSeqSteps)
+        seqStepNames.add (d.name);
+    layout.add (std::make_unique<juce::AudioParameterChoice> (
+        juce::ParameterID { ParamIDs::seqStep, 1 }, "Seq Step", seqStepNames, 5));   // 1/4
+
+    layout.add (std::make_unique<juce::AudioParameterBool> (
+        juce::ParameterID { ParamIDs::seqQuant, 1 }, "Seq Quantize", true));
+
+    layout.add (std::make_unique<juce::AudioParameterFloat> (
+        juce::ParameterID { ParamIDs::seqGlide, 1 }, "Seq Glide",
+        Range (0.0f, 1.0f, 0.001f), 0.0f, Attr().withStringFromValueFunction (percent)));
+
+    auto semitones = [] (float v, int)
+    {
+        const int n = juce::roundToInt (v);
+        return (n > 0 ? juce::String ("+") : juce::String()) + juce::String (n) + " st";
+    };
+    for (int i = 0; i < bbdres::kMaxSeqSteps; ++i)
+    {
+        layout.add (std::make_unique<juce::AudioParameterFloat> (
+            juce::ParameterID { ParamIDs::kStepIDs[i], 1 }, "Step " + juce::String (i + 1),
+            Range (-24.0f, 24.0f, 1.0f), 0.0f, Attr().withStringFromValueFunction (semitones)));
+        layout.add (std::make_unique<juce::AudioParameterBool> (
+            juce::ParameterID { ParamIDs::kStepOnIDs[i], 1 }, "Step " + juce::String (i + 1) + " On", true));
+    }
+
     // --- Sortie ---
     layout.add (std::make_unique<juce::AudioParameterFloat> (
         juce::ParameterID { ParamIDs::mix, 1 }, "Mix",
@@ -240,6 +284,16 @@ BBDResAudioProcessor::Targets BBDResAudioProcessor::readTargets() const
     t.holdHpLog2 = std::log2 (holdHpP->load());
     t.holdLpLog2 = std::log2 (holdLpP->load());
     t.holdQuant = holdQuantP->load() > 0.5f;
+    t.seqOn     = seqOnP->load() > 0.5f;
+    t.seqQuant  = seqQuantP->load() > 0.5f;
+    t.seqLength = juce::jlimit (1, bbdres::kMaxSeqSteps, juce::roundToInt (seqLengthP->load()));
+    t.seqStep   = juce::jlimit (0, bbdres::kNumSeqSteps - 1, juce::roundToInt (seqStepP->load()));
+    t.seqGlide  = seqGlideP->load();
+    for (int i = 0; i < bbdres::kMaxSeqSteps; ++i)
+    {
+        t.stepVal[i] = stepP[i]->load();
+        t.stepOn[i]  = stepOnP[i]->load() > 0.5f;
+    }
     t.lfoDepth  = lfoDepthP->load();
     t.loopDyn   = loopDynP->load();
     t.drift     = driftP->load();
@@ -260,6 +314,7 @@ void BBDResAudioProcessor::prepareToPlay (double sampleRate, int)
 {
     currentSampleRate = sampleRate;
     syncPhaseAcc = 0.0;
+    seqPosAcc = 0.0;
     const float fs = (float) sampleRate;
     const float controlRate = fs / (float) kControlBlock;
 
@@ -334,7 +389,7 @@ void BBDResAudioProcessor::processBlock (juce::AudioBuffer<float>& buffer, juce:
     const auto t = readTargets();
 
     // --- Tempo et position de l'hôte (pour la synchronisation du LFO) ---
-    double bpm = 120.0, ppqStart = 0.0;
+    double bpm = 120.0, ppqStart = 0.0, barBeats = 4.0;
     bool transportLocked = false;
     if (auto* playHead = getPlayHead())
     {
@@ -342,6 +397,9 @@ void BBDResAudioProcessor::processBlock (juce::AudioBuffer<float>& buffer, juce:
         {
             if (auto b = pos->getBpm())
                 if (*b > 1.0) bpm = *b;
+            if (auto ts = pos->getTimeSignature())
+                if (ts->numerator > 0 && ts->denominator > 0)
+                    barBeats = (double) ts->numerator * 4.0 / (double) ts->denominator;   // longueur d'une mesure, en temps
             if (pos->getIsPlaying())
                 if (auto p = pos->getPpqPosition())
                 {
@@ -408,8 +466,35 @@ void BBDResAudioProcessor::processBlock (juce::AudioBuffer<float>& buffer, juce:
             driftOct[c]   = driftFilterLfo[c].next (5) * t.drift * 0.5f;  // jusqu'à +/- 0,5 octave
         }
 
-        // --- Hauteur : LFO, puis quantification sur la gamme, puis accord fin ---
-        float base = t.tune + lfoSemis;
+        // --- Séquenceur de pitch : décalage de chaque pas par rapport à Tune, calé ou non sur la gamme générale ---
+        float seqBase = t.tune;
+        int seqIndex = -1;
+        if (t.seqOn)
+        {
+            const double stepBeats = bbdres::seqStepBeats (t.seqStep, barBeats);
+            double posSteps;
+            if (transportLocked)
+                posSteps = (ppqStart + (double) start * bpm / (60.0 * currentSampleRate)) / stepBeats;
+            else
+            {
+                seqPosAcc += bpm / 60.0 / stepBeats * (double) kControlBlock / currentSampleRate;
+                posSteps = seqPosAcc;
+            }
+            const auto sq = bbdres::sequencerState (posSteps, t.seqLength, t.stepVal, t.stepOn, t.seqGlide);
+            float noteA = t.tune + sq.prev, noteB = t.tune + sq.cur;
+            if (t.seqQuant)
+            {
+                const unsigned scaleMask = bbdres::kScales[t.scale].mask;
+                noteA = bbdres::quantizeToScale (noteA, t.root, scaleMask);
+                noteB = bbdres::quantizeToScale (noteB, t.root, scaleMask);
+            }
+            seqBase = noteA + (noteB - noteA) * sq.t;   // glissando continu entre deux notes
+            seqIndex = sq.index;
+        }
+        uiSeqStep.store (seqIndex);
+
+        // --- Hauteur : séquenceur et LFO, puis quantification générale, puis accord fin ---
+        float base = seqBase + lfoSemis;
         if (t.quantize)
             base = bbdres::quantizeToScale (base, t.root, bbdres::kScales[t.scale].mask);
         const float semisTarget = base + t.fine * 0.01f;
