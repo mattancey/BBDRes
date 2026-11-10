@@ -4,6 +4,7 @@
 #include "Dsp/Resonator.h"
 #include "Dsp/Pitch.h"
 #include "Dsp/Modulation.h"
+#include "Dsp/Sequencer.h"
 
 class BBDResAudioProcessor : public juce::AudioProcessor
 {
@@ -36,6 +37,7 @@ public:
 
     juce::AudioProcessorValueTreeState apvts;
     std::atomic<float> uiBpm { 120.0f };   // tempo de l'hôte, lu par l'interface (affichage de la division)
+    std::atomic<int> uiSeqStep { -1 };     // pas en cours du séquenceur (-1 = arrêté), lu par l'interface
     std::atomic<float> uiPitch { 48.0f };  // hauteur réelle du résonateur (LFO, quantification), lue par l'interface
 
 private:
@@ -47,7 +49,10 @@ private:
         float tune, fine, feedback, inLog2, loopLog2, mix, level, drive, bbd, noise;
         float lfoRate, lfoOffset, lfoDepth, loopDyn, drift, spread, cross, holdLen, holdMix, holdHpLog2, holdLpLog2, lowCutLog2, pultec;
         int curve, root, scale, lfoShape, lfoTarget, lfoSync;
-        bool quantize, freeze, holdQuant;
+        bool quantize, freeze, holdQuant, seqOn, seqQuant;
+        int seqLength, seqStep;
+        float seqGlide, stepVal[16];
+        bool stepOn[16];
     };
     Targets readTargets() const;
 
@@ -73,6 +78,13 @@ private:
     std::atomic<float>* holdLpP = nullptr;
     std::atomic<float>* lowCutP = nullptr;
     std::atomic<float>* pultecP = nullptr;
+    std::atomic<float>* seqOnP = nullptr;
+    std::atomic<float>* seqLengthP = nullptr;
+    std::atomic<float>* seqStepP = nullptr;
+    std::atomic<float>* seqQuantP = nullptr;
+    std::atomic<float>* seqGlideP = nullptr;
+    std::atomic<float>* stepP[16] = {};
+    std::atomic<float>* stepOnP[16] = {};
     std::atomic<float>* lfoPhaseP = nullptr;
     std::atomic<float>* rootP = nullptr;
     std::atomic<float>* scaleP = nullptr;
@@ -87,6 +99,7 @@ private:
     std::atomic<float>* crossP = nullptr;
 
     double currentSampleRate = 44100.0;
+    double seqPosAcc = 0.0;      // position du séquenceur (en pas) quand le transport est à l'arrêt
     double syncPhaseAcc = 0.0;   // phase du LFO synchronisé quand le transport est à l'arrêt
 
     bbdres::Resonator resonators[2];
