@@ -1,235 +1,246 @@
-#pragma once
+#include "PluginEditor.h"
+#include "Params.h"
+#include "UI/Widgets.h"
+#include "UI/Views.h"
 
-#include <juce_audio_processors/juce_audio_processors.h>
-#include <juce_gui_basics/juce_gui_basics.h>
-#include <array>
-#include "BBDLookAndFeel.h"
-#include "../Params.h"
-#include "../PluginProcessor.h"
-#include "../Dsp/Pitch.h"
-#include "../Dsp/Response.h"
-
-// Vues de l'interface : clavier de gamme et courbe de réponse du résonateur.
-namespace bbdui
+namespace
 {
-// Trois octaves de clavier, centrées sur l'octave de Tune. Les notes de la gamme choisie sont éclairées,
-// la tonique est plus vive. Un point glisse avec la hauteur RÉELLE du résonateur (LFO, quantification,
-// glissando), et chaque note visitée laisse une trace qui s'estompe. Affichage seul : pas de souris.
-class KeyboardView : public juce::Component, private juce::Timer
+using namespace bbdui;
+
+void dashedBox (juce::Graphics& g, juce::Rectangle<float> r, const juce::String& text)
+{
+    juce::Path outline, dashed;
+    outline.addRoundedRectangle (r, 6.0f);
+    const float dashes[] = { 4.0f, 4.0f };
+    juce::PathStrokeType (1.0f).createDashedStroke (dashed, outline, dashes, 2);
+    g.setColour (kLine);
+    g.strokePath (dashed, juce::PathStrokeType (1.0f));
+    g.setColour (juce::Colour (0xff7d838a));
+    g.setFont (font (10.0f));
+    g.drawText (text, r.toNearestInt(), juce::Justification::centred);
+}
+
+void panel (juce::Graphics& g, juce::Rectangle<int> r, const juce::String& title)
+{
+    g.setColour (kPanel);
+    g.fillRoundedRectangle (r.toFloat(), 6.0f);
+    g.setColour (kBorder);
+    g.drawRoundedRectangle (r.toFloat().reduced (0.5f), 6.0f, 1.0f);
+    g.setColour (kMuted);
+    g.setFont (font (10.0f, true));
+    g.drawText (title, r.getX() + 12, r.getY() + 6, r.getWidth() - 24, 14, juce::Justification::centredLeft);
+}
+
+juce::String durationText (float seconds)
+{
+    return seconds < 1.0f ? juce::String (juce::roundToInt (seconds * 1000.0f)) + " ms" : juce::String (seconds, 2) + " s";
+}
+
+class Content : public juce::Component, private juce::Timer
 {
 public:
-    KeyboardView (juce::AudioProcessorValueTreeState& a, BBDResAudioProcessor& p) : proc (p)
+    explicit Content (BBDResAudioProcessor& p) : proc (p)
     {
-        tuneP = a.getRawParameterValue (ParamIDs::tune);
-        rootP = a.getRawParameterValue (ParamIDs::root);
-        scaleP = a.getRawParameterValue (ParamIDs::scale);
-        glow.fill (0.0f);
-        setInterceptsMouseClicks (false, false);
-        startTimerHz (30);
+        auto& a = proc.apvts;
+        holdQuantP = a.getRawParameterValue (ParamIDs::holdQuant);
+
+        // --- Input ---
+        add<Knob> (a, ParamIDs::drive, "DRIVE").setBounds (28, 98, 64, 88);
+        add<ChoiceBox> (a, ParamIDs::driveCurve, "CURVE").setBounds (108, 116, 76, 42);
+        add<Knob> (a, ParamIDs::inputLP, "IN LP 12").setBounds (196, 98, 64, 88);
+
+        // --- Pitch ---
+        add<ChoiceBox> (a, ParamIDs::root, "ROOT").setBounds (28, 232, 70, 42);
+        add<ChoiceBox> (a, ParamIDs::scale, "SCALE").setBounds (104, 232, 100, 42);
+        add<ToggleBox> (a, ParamIDs::quantize, "QUANT").setBounds (212, 232, 62, 28);
+        add<KeyboardView> (a, proc).setBounds (28, 284, 246, 60);
+
+        // --- Resonator ---
+        add<Knob> (a, ParamIDs::tune, "TUNE").setBounds (310, 104, 116, 150);
+        add<Knob> (a, ParamIDs::fine, "FINE").setBounds (434, 138, 58, 88);
+        add<Knob> (a, ParamIDs::feedback, "FEEDBACK").setBounds (494, 130, 58, 88);
+        add<Knob> (a, ParamIDs::loopLP, "LOOP LP 6").setBounds (560, 130, 58, 88);
+        add<Knob> (a, ParamIDs::loopDyn, "LOOP DYN").setBounds (620, 130, 58, 88);
+        add<Knob> (a, ParamIDs::lowCut, "LOW CUT").setBounds (686, 130, 58, 88);
+        pultecKnob = &add<Knob> (a, ParamIDs::pultec, "PULTEC");
+        pultecKnob->setBounds (746, 130, 58, 88);
+        add<Knob> (a, ParamIDs::bbd, "BBD").setBounds (812, 130, 58, 88);
+        add<Knob> (a, ParamIDs::noise, "NOISE").setBounds (872, 130, 58, 88);
+        add<ResponseView> (a, proc).setBounds (310, 272, 630, 210);
+
+        // --- Mod ---
+        add<ChoiceBox> (a, ParamIDs::lfoShape, "SHAPE").setBounds (976, 100, 92, 42);
+        syncBox = &add<ChoiceBox> (a, ParamIDs::lfoSync, "SYNC");
+        syncBox->setBounds (1074, 100, 80, 42);
+        add<ChoiceBox> (a, ParamIDs::lfoTarget, "TARGET").setBounds (1160, 100, 92, 42);
+        // Même emplacement pour deux potards : RATE en mode libre, PHASE en mode synchronisé
+        rateKnob = &add<Knob> (a, ParamIDs::lfoRate, "RATE");
+        rateKnob->setBounds (976, 156, 64, 88);
+        phaseKnob = &add<Knob> (a, ParamIDs::lfoPhase, "PHASE");
+        phaseKnob->setBounds (976, 156, 64, 88);
+        add<Knob> (a, ParamIDs::lfoDepth, "DEPTH").setBounds (1056, 156, 64, 88);
+        add<Knob> (a, ParamIDs::drift, "DRIFT").setBounds (1136, 156, 64, 88);
+
+        // --- Stereo ---
+        add<Knob> (a, ParamIDs::spread, "SPREAD").setBounds (976, 288, 64, 88);
+        add<Knob> (a, ParamIDs::cross, "CROSS").setBounds (1056, 288, 64, 88);
+
+        // --- Hold (looper) ---
+        add<ToggleBox> (a, ParamIDs::freeze, "FREEZE").setBounds (30, 640, 110, 52);
+        lengthKnob = &add<Knob> (a, ParamIDs::holdLen, "LENGTH", 92);
+        lengthKnob->setBounds (148, 626, 92, 88);
+        add<ToggleBox> (a, ParamIDs::holdQuant, "QUANT").setBounds (250, 650, 62, 28);
+        add<Knob> (a, ParamIDs::holdMix, "HOLD MIX").setBounds (326, 626, 64, 88);
+        add<BandSlider> (a, ParamIDs::holdHP, ParamIDs::holdLP).setBounds (410, 640, 570, 56);
+
+        // --- Output ---
+        add<Knob> (a, ParamIDs::mix, "MIX").setBounds (1030, 626, 64, 88);
+        add<Knob> (a, ParamIDs::outLevel, "LEVEL").setBounds (1120, 626, 64, 88);
+
+        syncBox->combo.onChange = [this] { updateLfoKnobs(); };
+        updateLfoKnobs();
+
+        // Pultec : 0 % s'affiche SOFT, 100 % s'affiche HP, et à 100 % le nom du potard devient HP-6dB
+        pultecKnob->slider.textFromValueFunction = [] (double v)
+        {
+            if (v <= 0.001) return juce::String ("SOFT");
+            if (v >= 0.999) return juce::String ("HP");
+            return juce::String (juce::roundToInt (v * 100.0)) + " %";
+        };
+        pultecKnob->slider.onValueChange = [this] { updatePultecLabel(); };
+        pultecKnob->slider.updateText();
+        updatePultecLabel();
+
+        // Length : avec Quantize, le texte montre la division rythmique réellement utilisée (ex. « 1/8  250 ms »)
+        lengthKnob->slider.textFromValueFunction = [this] (double v)
+        {
+            const float sec = bbdres::holdSecondsFromSlider ((float) v);
+            if (holdQuantP->load() <= 0.5f)
+                return durationText (sec);
+            const float bpm = proc.uiBpm.load();
+            const int idx = bbdres::quantizeHoldIndex (sec, bpm);
+            if (idx < 0)
+                return durationText (sec);
+            return juce::String (bbdres::kHoldNames[idx]) + "  " + durationText (bbdres::kHoldBeats[idx] * 60.0f / std::max (bpm, 20.0f));
+        };
+        lengthKnob->slider.updateText();
+        startTimerHz (10);
     }
 
     void paint (juce::Graphics& g) override
     {
-        const State s = readState();
-        const float w = (float) getWidth() / 21.0f, h = (float) getHeight();
-        static const int whiteSemis[7] = { 0, 2, 4, 5, 7, 9, 11 };
-        static const int blackSemis[5] = { 1, 3, 6, 8, 10 };
-        static const int blackAfter[5] = { 0, 1, 3, 4, 5 };
+        g.fillAll (kBg);
 
-        for (int i = 0; i < 21; ++i)
-        {
-            const int note = s.start + (i / 7) * 12 + whiteSemis[i % 7];
-            const auto key = juce::Rectangle<float> ((float) i * w + 1.0f, 0.0f, w - 2.0f, h);
-            g.setColour (keyColour (s, note, false));
-            g.fillRoundedRectangle (key, 2.0f);
-            drawTrace (g, key, note - s.start);
-        }
-        for (int oct = 0; oct < 3; ++oct)
-            for (int j = 0; j < 5; ++j)
-            {
-                const int note = s.start + oct * 12 + blackSemis[j];
-                const float bw = w * 0.62f;
-                const float x = (float) (blackAfter[j] + oct * 7 + 1) * w - bw * 0.5f;
-                const auto key = juce::Rectangle<float> (x, 0.0f, bw, h * 0.62f);
-                g.setColour (keyColour (s, note, true));
-                g.fillRoundedRectangle (key, 2.0f);
-                drawTrace (g, key, note - s.start);
-            }
-
-        // le point : hauteur réelle du résonateur, glissante ou par bonds selon la quantification
-        const float rel = juce::jlimit (0.0f, 35.0f, proc.uiPitch.load() - (float) s.start);
-        const int k0 = (int) std::floor (rel);
-        const int k1 = juce::jmin (35, k0 + 1);
-        const float x = centreX (k0, w) + (centreX (k1, w) - centreX (k0, w)) * (rel - (float) k0);
-        g.setColour (kText);
-        g.fillEllipse (x - 5.0f, h - 13.0f, 10.0f, 10.0f);
-        g.setColour (kBg);
-        g.fillEllipse (x - 3.0f, h - 11.0f, 6.0f, 6.0f);
-    }
-
-private:
-    struct State { int start, root; unsigned mask; };
-
-    State readState() const
-    {
-        State s;
-        s.root = juce::jlimit (0, 11, juce::roundToInt (rootP->load()));
-        s.mask = bbdres::kScales[juce::jlimit (0, bbdres::kNumScales - 1, juce::roundToInt (scaleP->load()))].mask;
-        s.start = 12 * (int) std::floor (tuneP->load() / 12.0f) - 12;   // l'octave de Tune au centre
-        return s;
-    }
-
-    // abscisse du centre d'une touche, en unités de touches blanches (les noires sont entre deux blanches)
-    static float centreX (int k, float w)
-    {
-        static const float posInOctave[12] = { 0.5f, 1.0f, 1.5f, 2.0f, 2.5f, 3.5f, 4.0f, 4.5f, 5.0f, 5.5f, 6.0f, 6.5f };
-        return ((float) (k / 12) * 7.0f + posInOctave[k % 12]) * w;
-    }
-
-    static juce::Colour keyColour (const State& s, int note, bool black)
-    {
-        const int degree = (((note - s.root) % 12) + 12) % 12;
-        if (((s.mask >> degree) & 1u) != 0u)
-            return degree == 0 ? kAmber.brighter (0.35f) : (black ? kAmber.darker (0.35f) : kAmber);
-        return black ? juce::Colour (0xff2a2d31) : juce::Colour (0xffcfc9ba);
-    }
-
-    void drawTrace (juce::Graphics& g, juce::Rectangle<float> key, int index) const
-    {
-        if (index < 0 || index >= 36) return;
-        const float gl = glow[(size_t) index];
-        if (gl < 0.03f) return;
-        g.setColour (kText.withAlpha (0.8f * gl));
-        g.fillRoundedRectangle (key, 2.0f);
-    }
-
-    void timerCallback() override
-    {
-        const State s = readState();
-        if (s.start != lastStart) { glow.fill (0.0f); lastStart = s.start; }
-        const int idx = juce::roundToInt (proc.uiPitch.load()) - s.start;
-        if (idx >= 0 && idx < 36) glow[(size_t) idx] = 1.0f;
-        for (auto& v : glow) v *= 0.94f;   // la trace s'éteint en environ une demi-seconde
-        repaint();
-    }
-
-    BBDResAudioProcessor& proc;
-    std::atomic<float>* tuneP = nullptr;
-    std::atomic<float>* rootP = nullptr;
-    std::atomic<float>* scaleP = nullptr;
-    std::array<float, 36> glow;
-    int lastStart = -1000;
-};
-
-// Courbe de réponse du résonateur (sortie humide) : pics aux multiples de la note, creusés par
-// Feedback, filtrés par Input LP, Loop LP et le BBD. Calculée d'après les réglages (sans les modulations).
-class ResponseView : public juce::Component, private juce::Timer
-{
-public:
-    ResponseView (juce::AudioProcessorValueTreeState& a, BBDResAudioProcessor& p) : proc (p)
-    {
-        tuneP = a.getRawParameterValue (ParamIDs::tune);
-        fineP = a.getRawParameterValue (ParamIDs::fine);
-        fbP = a.getRawParameterValue (ParamIDs::feedback);
-        inP = a.getRawParameterValue (ParamIDs::inputLP);
-        loopP = a.getRawParameterValue (ParamIDs::loopLP);
-        bbdP = a.getRawParameterValue (ParamIDs::bbd);
-        lowP = a.getRawParameterValue (ParamIDs::lowCut);
-        pultecP = a.getRawParameterValue (ParamIDs::pultec);
-        startTimerHz (20);
-    }
-
-    void paint (juce::Graphics& g) override
-    {
-        const auto r = getLocalBounds().toFloat();
-        g.setColour (kDark);
-        g.fillRoundedRectangle (r, 6.0f);
-        g.setColour (kBorder);
-        g.drawRoundedRectangle (r.reduced (0.5f), 6.0f, 1.0f);
-
-        const float left = 40.0f, right = 14.0f, top = 14.0f, bottom = 24.0f;
-        const float pw = r.getWidth() - left - right, ph = r.getHeight() - top - bottom;
-        const float fMin = 40.0f, fMax = 12000.0f, dbMin = -30.0f, dbMax = 30.0f;
-        auto xOf = [&] (float f) { return left + std::log (f / fMin) / std::log (fMax / fMin) * pw; };
-        auto yOf = [&] (float db) { return top + (1.0f - (db - dbMin) / (dbMax - dbMin)) * ph; };
-
-        // grille et repères
-        g.setFont (font (9.0f));
-        for (const float f : { 100.0f, 1000.0f, 10000.0f })
-        {
-            g.setColour (kBorder);
-            g.drawLine (xOf (f), top, xOf (f), top + ph, 1.0f);
-            g.setColour (kMuted);
-            g.drawText (f >= 1000.0f ? juce::String ((int) (f / 1000.0f)) + "k" : juce::String ((int) f),
-                        (int) xOf (f) - 20, (int) (top + ph + 4.0f), 40, 14, juce::Justification::centred);
-        }
-        for (const float db : { -20.0f, 0.0f, 20.0f })
-        {
-            g.setColour (db == 0.0f ? kLine : kBorder);
-            g.drawLine (left, yOf (db), left + pw, yOf (db), 1.0f);
-            g.setColour (kMuted);
-            g.drawText ((db > 0.0f ? "+" : "") + juce::String ((int) db) + " dB", 2, (int) yOf (db) - 7, (int) left - 6, 14, juce::Justification::centredRight);
-        }
-
-        // modèle d'après les réglages actuels
-        bbdres::ResponseParams rp;
-        rp.semitones = tuneP->load() + fineP->load() * 0.01f;
-        rp.feedback = fbP->load();
-        rp.inputLpHz = inP->load();
-        rp.loopLpHz = loopP->load();
-        rp.bbd = bbdP->load();
-        rp.lowCutHz = lowP->load();
-        rp.lowCutAmt = pultecP->load();
-        const double sr = proc.getSampleRate();
-        rp.fs = sr > 8000.0 ? (float) sr : 48000.0f;
-        bbdres::ResponseModel model;
-        model.set (rp);
-
-        juce::Path curve;
-        const int n = juce::jmax (2, (int) pw);
-        for (int i = 0; i < n; ++i)
-        {
-            const float f = fMin * std::pow (fMax / fMin, (float) i / (float) (n - 1));
-            const float db = juce::jlimit (dbMin, dbMax, model.db (f));
-            if (i == 0) curve.startNewSubPath (left, yOf (db));
-            else        curve.lineTo (left + (float) i * pw / (float) (n - 1), yOf (db));
-        }
-        juce::Path fill (curve);
-        fill.lineTo (left + pw, yOf (dbMin));
-        fill.lineTo (left, yOf (dbMin));
-        fill.closeSubPath();
-        g.setColour (kAmber.withAlpha (0.10f));
-        g.fillPath (fill);
+        // En-tête
         g.setColour (kAmber);
-        g.strokePath (curve, juce::PathStrokeType (1.6f));
+        g.setFont (font (20.0f, true));
+        g.drawText ("DARKSWAN V2", 16, 16, 220, 44, juce::Justification::centredLeft);
+        dashedBox (g, { 250.0f, 22.0f, 760.0f, 32.0f }, u8 ("PRESETS ET A/B : BIENTÔT"));
 
-        // note fondamentale
-        const float f0 = model.fundamentalHz();
-        if (f0 > fMin && f0 < fMax)
-        {
-            g.setColour (kAmber.withAlpha (0.6f));
-            g.drawLine (xOf (f0), top, xOf (f0), top + ph, 1.0f);
-        }
+        // Panneaux
+        panel (g, { 16, 72, 270, 118 }, "INPUT");
+        panel (g, { 16, 202, 270, 170 }, "PITCH");
+        panel (g, { 298, 72, 654, 524 }, "RESONATOR");
+        panel (g, { 964, 72, 300, 186 }, "MOD");
+        panel (g, { 964, 270, 300, 118 }, "STEREO");
+        panel (g, { 16, 608, 986, 118 }, "HOLD - LOOPER");
+        panel (g, { 1014, 608, 250, 118 }, "OUTPUT");
+
+        // Zones réservées pour les fonctions à venir
+        dashedBox (g, { 16.0f, 384.0f, 270.0f, 212.0f }, u8 ("RÉSERVÉ - NOUVELLES FONCTIONS"));
+        dashedBox (g, { 964.0f, 400.0f, 300.0f, 196.0f }, u8 ("RÉSERVÉ"));
+        dashedBox (g, { 16.0f, 738.0f, 1248.0f, 26.0f }, u8 ("SÉQUENCEUR DE PITCH : tiroir replié (v3)"));
+
+        // Résonateurs (le deuxième est pour plus tard)
+        g.setColour (kAmber);
+        g.drawRoundedRectangle (310.5f, 496.5f, 55.0f, 27.0f, 3.0f, 1.0f);
+        g.setFont (font (11.0f, true));
+        g.drawText ("R1", 310, 496, 56, 28, juce::Justification::centred);
+        dashedBox (g, { 374.0f, 496.0f, 190.0f, 28.0f }, u8 ("+ RÉSONATEUR - v3"));
+
+        // Séparateurs dans le panneau Resonator : Loop LP et Loop Dyn forment un groupe
+        g.setColour (kBorder);
+        g.drawLine (556.0f, 128.0f, 556.0f, 222.0f, 1.0f);   // Loop LP + Loop Dyn
+        g.drawLine (682.0f, 128.0f, 682.0f, 222.0f, 1.0f);   // Low Cut + Pultec
+        g.drawLine (808.0f, 128.0f, 808.0f, 222.0f, 1.0f);   // BBD + Noise
     }
 
 private:
+    template <typename T, typename... Args>
+    T& add (Args&&... args)
+    {
+        auto p = std::make_unique<T> (std::forward<Args> (args)...);
+        T& ref = *p;
+        addAndMakeVisible (ref);
+        owned.push_back (std::move (p));
+        return ref;
+    }
+
+    void updateLfoKnobs()
+    {
+        const bool freeRunning = syncBox->combo.getSelectedItemIndex() <= 0;
+        rateKnob->setVisible (freeRunning);
+        phaseKnob->setVisible (! freeRunning);
+    }
+
+    void updatePultecLabel()
+    {
+        pultecKnob->name.setText (pultecKnob->slider.getValue() >= 0.999 ? "HP-6dB" : "PULTEC", juce::dontSendNotification);
+    }
+
+    // Le texte de Length dépend du tempo de l'hôte et de Quantize : on le rafraîchit quand ils changent
     void timerCallback() override
     {
-        const float stamp = tuneP->load() * 1000.0f + fineP->load() * 3.0f + fbP->load() * 71.0f
-                          + std::log2 (inP->load()) * 13.0f + std::log2 (loopP->load()) * 17.0f + bbdP->load() * 29.0f + lowP->load() * 0.7f + pultecP->load() * 37.0f
-                          + (float) proc.getSampleRate() * 0.001f;
-        if (std::abs (stamp - lastStamp) > 1.0e-4f) { lastStamp = stamp; repaint(); }
+        const float bpm = proc.uiBpm.load();
+        const bool quant = holdQuantP->load() > 0.5f;
+        if (quant != lastQuant || std::abs (bpm - lastBpm) > 0.05f)
+        {
+            lastQuant = quant;
+            lastBpm = bpm;
+            lengthKnob->slider.updateText();
+        }
     }
 
     BBDResAudioProcessor& proc;
-    std::atomic<float>* tuneP = nullptr;
-    std::atomic<float>* fineP = nullptr;
-    std::atomic<float>* fbP = nullptr;
-    std::atomic<float>* inP = nullptr;
-    std::atomic<float>* loopP = nullptr;
-    std::atomic<float>* bbdP = nullptr;
-    std::atomic<float>* lowP = nullptr;
-    std::atomic<float>* pultecP = nullptr;
-    float lastStamp = -1.0e9f;
+    std::vector<std::unique_ptr<juce::Component>> owned;
+    ChoiceBox* syncBox = nullptr;
+    Knob* rateKnob = nullptr;
+    Knob* phaseKnob = nullptr;
+    Knob* lengthKnob = nullptr;
+    Knob* pultecKnob = nullptr;
+    std::atomic<float>* holdQuantP = nullptr;
+    float lastBpm = 120.0f;
+    bool lastQuant = false;
 };
-} // namespace bbdui
+} // namespace
+
+BBDResAudioProcessorEditor::BBDResAudioProcessorEditor (BBDResAudioProcessor& p)
+    : juce::AudioProcessorEditor (p), proc (p)
+{
+    setLookAndFeel (&laf);
+    content = std::make_unique<Content> (proc);
+    addAndMakeVisible (*content);
+
+    constrainer.setFixedAspectRatio ((double) kDesignW / (double) kDesignH);
+    constrainer.setSizeLimits (kDesignW / 2, kDesignH / 2, kDesignW * 2, kDesignH * 2);
+    setConstrainer (&constrainer);
+    setResizable (true, true);
+    setSize (kDesignW, kDesignH);
+}
+
+BBDResAudioProcessorEditor::~BBDResAudioProcessorEditor()
+{
+    setLookAndFeel (nullptr);
+}
+
+void BBDResAudioProcessorEditor::paint (juce::Graphics& g)
+{
+    g.fillAll (bbdui::kBg);
+}
+
+void BBDResAudioProcessorEditor::resized()
+{
+    const float scale = (float) getWidth() / (float) kDesignW;
+    content->setTransform (juce::AffineTransform::scale (scale));
+    content->setBounds (0, 0, kDesignW, kDesignH);
+}
