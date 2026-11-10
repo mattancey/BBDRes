@@ -12,9 +12,10 @@
 // Vues de l'interface : clavier de gamme et courbe de réponse du résonateur.
 namespace bbdui
 {
-// Trois octaves de clavier, centrées sur l'octave de Tune. Les notes de la gamme choisie sont éclairées,
-// la tonique est plus vive. Un point glisse avec la hauteur RÉELLE du résonateur (LFO, quantification,
-// glissando), et chaque note visitée laisse une trace qui s'estompe. Affichage seul : pas de souris.
+// Deux octaves de clavier. Les notes de la gamme choisie sont éclairées, la tonique est plus vive.
+// Le point marque la note du réglage de Tune (calée sur la gamme si Quantize est actif).
+// Le balayage de la hauteur réelle (LFO, séquenceur, glissando) se lit par l'illumination : chaque
+// note visitée s'éclaire puis s'estompe. Affichage seul : pas de souris.
 class KeyboardView : public juce::Component, private juce::Timer
 {
 public:
@@ -23,6 +24,7 @@ public:
         tuneP = a.getRawParameterValue (ParamIDs::tune);
         rootP = a.getRawParameterValue (ParamIDs::root);
         scaleP = a.getRawParameterValue (ParamIDs::scale);
+        quantP = a.getRawParameterValue (ParamIDs::quantize);
         glow.fill (0.0f);
         setInterceptsMouseClicks (false, false);
         startTimerHz (30);
@@ -31,12 +33,12 @@ public:
     void paint (juce::Graphics& g) override
     {
         const State s = readState();
-        const float w = (float) getWidth() / 21.0f, h = (float) getHeight();
+        const float w = (float) getWidth() / 14.0f, h = (float) getHeight();
         static const int whiteSemis[7] = { 0, 2, 4, 5, 7, 9, 11 };
         static const int blackSemis[5] = { 1, 3, 6, 8, 10 };
         static const int blackAfter[5] = { 0, 1, 3, 4, 5 };
 
-        for (int i = 0; i < 21; ++i)
+        for (int i = 0; i < 14; ++i)
         {
             const int note = s.start + (i / 7) * 12 + whiteSemis[i % 7];
             const auto key = juce::Rectangle<float> ((float) i * w + 1.0f, 0.0f, w - 2.0f, h);
@@ -44,7 +46,7 @@ public:
             g.fillRoundedRectangle (key, 2.0f);
             drawTrace (g, key, note - s.start);
         }
-        for (int oct = 0; oct < 3; ++oct)
+        for (int oct = 0; oct < 2; ++oct)
             for (int j = 0; j < 5; ++j)
             {
                 const int note = s.start + oct * 12 + blackSemis[j];
@@ -56,26 +58,29 @@ public:
                 drawTrace (g, key, note - s.start);
             }
 
-        // le point : hauteur réelle du résonateur, glissante ou par bonds selon la quantification
-        const float rel = juce::jlimit (0.0f, 35.0f, proc.uiPitch.load() - (float) s.start);
-        const int k0 = (int) std::floor (rel);
-        const int k1 = juce::jmin (35, k0 + 1);
-        const float x = centreX (k0, w) + (centreX (k1, w) - centreX (k0, w)) * (rel - (float) k0);
-        g.setColour (kText);
-        g.fillEllipse (x - 5.0f, h - 13.0f, 10.0f, 10.0f);
-        g.setColour (kBg);
-        g.fillEllipse (x - 3.0f, h - 11.0f, 6.0f, 6.0f);
+        // le point : note du réglage de Tune
+        const int k = s.played - s.start;
+        if (k >= 0 && k < 24)
+        {
+            const float x = centreX (k, w);
+            g.setColour (kText);
+            g.fillEllipse (x - 5.0f, h - 13.0f, 10.0f, 10.0f);
+            g.setColour (kBg);
+            g.fillEllipse (x - 3.0f, h - 11.0f, 6.0f, 6.0f);
+        }
     }
 
 private:
-    struct State { int start, root; unsigned mask; };
+    struct State { int start, root, played; unsigned mask; };
 
     State readState() const
     {
         State s;
+        const float tune = tuneP->load();
         s.root = juce::jlimit (0, 11, juce::roundToInt (rootP->load()));
         s.mask = bbdres::kScales[juce::jlimit (0, bbdres::kNumScales - 1, juce::roundToInt (scaleP->load()))].mask;
-        s.start = 12 * (int) std::floor (tuneP->load() / 12.0f) - 12;   // l'octave de Tune au centre
+        s.played = quantP->load() > 0.5f ? juce::roundToInt (bbdres::quantizeToScale (tune, s.root, s.mask)) : juce::roundToInt (tune);
+        s.start = 12 * (int) std::floor ((tune + 6.0f) / 12.0f) - 12;   // Tune reste au moins 6 demi-tons du bord
         return s;
     }
 
@@ -96,7 +101,7 @@ private:
 
     void drawTrace (juce::Graphics& g, juce::Rectangle<float> key, int index) const
     {
-        if (index < 0 || index >= 36) return;
+        if (index < 0 || index >= 24) return;
         const float gl = glow[(size_t) index];
         if (gl < 0.03f) return;
         g.setColour (kText.withAlpha (0.8f * gl));
@@ -108,7 +113,7 @@ private:
         const State s = readState();
         if (s.start != lastStart) { glow.fill (0.0f); lastStart = s.start; }
         const int idx = juce::roundToInt (proc.uiPitch.load()) - s.start;
-        if (idx >= 0 && idx < 36) glow[(size_t) idx] = 1.0f;
+        if (idx >= 0 && idx < 24) glow[(size_t) idx] = 1.0f;
         for (auto& v : glow) v *= 0.94f;   // la trace s'éteint en environ une demi-seconde
         repaint();
     }
@@ -117,7 +122,8 @@ private:
     std::atomic<float>* tuneP = nullptr;
     std::atomic<float>* rootP = nullptr;
     std::atomic<float>* scaleP = nullptr;
-    std::array<float, 36> glow;
+    std::atomic<float>* quantP = nullptr;
+    std::array<float, 24> glow;
     int lastStart = -1000;
 };
 
