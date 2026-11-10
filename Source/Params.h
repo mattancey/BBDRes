@@ -39,6 +39,16 @@ inline constexpr const char* drift      = "drift";       // 0..1
 // Stereo
 inline constexpr const char* spread     = "spread";      // désaccord gauche/droite 0..1
 inline constexpr const char* cross      = "cross";       // couplage gauche/droite 0..1
+// Sequencer
+inline constexpr const char* seqOn     = "seqOn";      // séquenceur de pitch actif
+inline constexpr const char* seqLength = "seqLength";  // nombre de pas, 1..16
+inline constexpr const char* seqStep   = "seqStep";    // durée d'un pas (index dans kSeqSteps)
+inline constexpr const char* seqQuant  = "seqQuant";   // hauteurs des pas calées sur la gamme générale
+inline constexpr const char* seqGlide  = "seqGlide";   // glissando entre pas, fraction de la durée du pas
+inline constexpr const char* kStepIDs[16]   = { "step1", "step2", "step3", "step4", "step5", "step6", "step7", "step8",
+                                                "step9", "step10", "step11", "step12", "step13", "step14", "step15", "step16" };
+inline constexpr const char* kStepOnIDs[16] = { "stepOn1", "stepOn2", "stepOn3", "stepOn4", "stepOn5", "stepOn6", "stepOn7", "stepOn8",
+                                                "stepOn9", "stepOn10", "stepOn11", "stepOn12", "stepOn13", "stepOn14", "stepOn15", "stepOn16" };
 // Output
 inline constexpr const char* mix        = "mix";         // dry/wet 0..1
 inline constexpr const char* outLevel   = "outLevel";    // niveau de sortie, dB
