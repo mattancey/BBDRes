@@ -416,19 +416,22 @@ static void testHoldFilter()
 static void testResponseModel()
 {
     const float fs = 48000.0f;
-    struct Cfg { float note, fb, inLp, loopLp, bbd; };
+    struct Cfg { float note, fb, inLp, loopLp, bbd, lowHz, lowAmt; };
     double worstAll = 0.0;
-    for (Cfg c : { Cfg { 48.0f, 0.7f, 8000.0f, 6000.0f, 0.3f }, Cfg { 60.0f, 0.9f, 12000.0f, 12000.0f, 0.6f }, Cfg { 36.0f, 0.5f, 5000.0f, 3000.0f, 0.0f } })
+    for (Cfg c : { Cfg { 48.0f, 0.7f, 8000.0f, 6000.0f, 0.3f, 80.0f, 0.0f }, Cfg { 60.0f, 0.9f, 12000.0f, 12000.0f, 0.6f, 80.0f, 0.0f },
+                   Cfg { 36.0f, 0.5f, 5000.0f, 3000.0f, 0.0f, 80.0f, 0.0f }, Cfg { 48.0f, 0.8f, 12000.0f, 12000.0f, 0.2f, 200.0f, 0.7f },
+                   Cfg { 55.0f, 0.9f, 12000.0f, 8000.0f, 0.0f, 300.0f, 1.0f } })
     {
         Resonator r; r.prepare (fs);
         ResonatorParams p; p.semitones = c.note; p.feedback = c.fb; p.inputLpHz = c.inLp; p.loopLpHz = c.loopLp; p.bbd = c.bbd;
+        p.lowCutHz = c.lowHz; p.lowCutAmt = c.lowAmt;
         p.noiseGain = 0.0f; p.jitterGain = 0.0f;
         r.update (p); r.reset();
         const int n = 96000;
         std::vector<float> y ((size_t) n);
         for (int i = 0; i < n; ++i) y[(size_t) i] = r.process (i == 0 ? 0.001f : 0.0f);   // impulsion faible : régime linéaire
 
-        bbdres::ResponseParams rp; rp.semitones = c.note; rp.feedback = c.fb; rp.inputLpHz = c.inLp; rp.loopLpHz = c.loopLp; rp.bbd = c.bbd; rp.fs = fs;
+        bbdres::ResponseParams rp; rp.semitones = c.note; rp.feedback = c.fb; rp.inputLpHz = c.inLp; rp.loopLpHz = c.loopLp; rp.bbd = c.bbd; rp.lowCutHz = c.lowHz; rp.lowCutAmt = c.lowAmt; rp.fs = fs;
         bbdres::ResponseModel m; m.set (rp);
         const double f0 = (double) m.fundamentalHz();
         double worst = 0.0;
@@ -440,10 +443,63 @@ static void testResponseModel()
             const double model = (double) m.db ((float) f);
             worst = std::max (worst, std::fabs (meas - model));
         }
-        std::printf ("courbe : note %.0f fb %.1f bbd %.1f -> ecart max modele/mesure = %.2f dB\n", c.note, c.fb, c.bbd, worst);
+        std::printf ("courbe : note %.0f fb %.1f bbd %.1f pultec %.1f -> ecart max modele/mesure = %.2f dB\n", c.note, c.fb, c.bbd, c.lowAmt, worst);
         worstAll = std::max (worstAll, worst);
     }
     check (worstAll < 1.5, "la courbe de l'interface ne colle pas a la reponse reelle (1,5 dB)");
+}
+
+// Atténuateur de graves « Pultec » de la boucle : transparent à 0, passe-haut 6 dB à 100 %, accord conservé
+static void testPultec()
+{
+    const float fs = 48000.0f;
+    std::vector<float> src;
+    for (int i = 0; i < 48000 * 3; ++i) src.push_back (0.3f * rnd());
+    auto render = [&] (float lowHz, float amt)
+    {
+        Resonator r; r.prepare (fs, 1u);
+        ResonatorParams p; p.semitones = 48.0f; p.feedback = 0.7f; p.inputLpHz = 20000.0f; p.loopLpHz = 20000.0f; p.bbd = 0.0f;
+        p.lowCutHz = lowHz; p.lowCutAmt = amt;
+        r.update (p); r.reset();
+        std::vector<float> y;
+        for (int i = 0; i < 48000 * 3; ++i) { if (i % 16 == 0) r.update (p); const float v = r.process (src[(size_t) i]); if (i >= 48000) y.push_back (v); }
+        return y;
+    };
+    auto db = [&] (const std::vector<float>& y, double f0, double f1)
+    {
+        double acc = 0.0; int cnt = 0; const size_t n = y.size();
+        for (double f = f0; f <= f1; f += (f1 - f0) / 24.0)
+        {
+            const double w = 2.0 * 3.14159265358979 * f / (double) fs; double re = 0, im = 0;
+            for (size_t i = 0; i < n; i += 2)
+            {
+                const double win = 0.5 - 0.5 * std::cos (2.0 * 3.14159265358979 * (double) i / (double) (n - 1));
+                re += y[i] * win * std::cos (w * (double) i); im -= y[i] * win * std::sin (w * (double) i);
+            }
+            acc += 10.0 * std::log10 ((re * re + im * im) / (double) n + 1e-30); ++cnt;
+        }
+        return acc / cnt;
+    };
+    const auto soft = render (300.0f, 0.0f), half = render (300.0f, 0.5f), hp = render (300.0f, 1.0f);
+    const double lowHalf = db (half, 40, 120) - db (soft, 40, 120), lowHp = db (hp, 40, 120) - db (soft, 40, 120);
+    const double midHp = db (hp, 2000, 4000) - db (soft, 2000, 4000);
+    std::printf ("pultec 300 Hz : graves (40-120 Hz) %+.1f dB a 50 %% ; %+.1f dB a 100 %% ; medium (2-4 kHz) %+.1f dB a 100 %%\n", lowHalf, lowHp, midHp);
+    check (lowHalf < -3.0 && lowHalf > lowHp, "pultec : le plateau n'est pas progressif");
+    check (lowHp < -10.0, "pultec : le passe-haut ne coupe pas assez les graves");
+    check (std::fabs (midHp) < 1.5, "pultec : les mediums sont alteres");
+
+    // à 0, la fréquence n'a aucun effet : exactement transparent
+    const auto a = render (20.0f, 0.0f), b = render (600.0f, 0.0f);
+    float dmax = 0.0f; for (size_t i = 0; i < a.size(); ++i) dmax = std::max (dmax, std::fabs (a[i] - b[i]));
+    check (dmax == 0.0f, "pultec : pas transparent a 0 %");
+
+    // stabilité aux réglages extrêmes
+    Resonator r; r.prepare (fs);
+    ResonatorParams p; p.feedback = 1.0f; p.lowCutHz = 600.0f; p.lowCutAmt = 1.0f; p.semitones = 30.0f; p.drive = 1.0f; p.bbd = 1.0f; p.noise = 1.0f;
+    r.update (p); r.reset();
+    float worst = 0.0f; bool finite = true;
+    for (int i = 0; i < 48000 * 3; ++i) { const float v = r.process (i < 48000 ? rnd() : 0.0f); if (! std::isfinite (v)) finite = false; worst = std::max (worst, std::fabs (v)); }
+    check (finite && worst < 8.0f, "pultec : instable aux reglages extremes");
 }
 
 // Pas de clic quand le BBD quitte zéro (le filtre ne doit pas s'enclencher d'un coup)
@@ -624,6 +680,7 @@ int main()
     testRelease();
     testHoldFilter();
     testResponseModel();
+    testPultec();
     testNoiseAndBbd();
     testBbdClick();
     for (float cr : { 0.25f, 0.5f, 1.0f })
