@@ -3,6 +3,7 @@
 #include "../Source/Dsp/Pitch.h"
 #include "../Source/Dsp/Modulation.h"
 #include "../Source/Dsp/Response.h"
+#include "../Source/Dsp/Sequencer.h"
 #include <cstdio>
 #include <string>
 #include <cstdlib>
@@ -502,6 +503,45 @@ static void testPultec()
     check (finite && worst < 8.0f, "pultec : instable aux reglages extremes");
 }
 
+// Séquenceur de pitch : position -> pas, liaison des pas désactivés, glissando, durées de pas
+static void testSequencer()
+{
+    float v[16] = { 0, 7, 3, 12, -5, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0 };
+    bool on[16];
+    for (bool& b : on) b = true;
+
+    auto s = bbdres::sequencerState (5.3, 4, v, on, 0.0f);          // longueur 4 : le pas 5 retombe sur le pas 1
+    check (s.index == 1 && s.cur == 7.0f && s.prev == 0.0f, "sequenceur : index apres bouclage");
+    s = bbdres::sequencerState (-0.5, 4, v, on, 0.0f);              // position négative : dernier pas
+    check (s.index == 3 && s.cur == 12.0f, "sequenceur : position negative");
+    s = bbdres::sequencerState (1.0e9 + 0.25, 16, v, on, 0.0f);     // très loin dans le temps
+    check (s.index >= 0 && s.index < 16, "sequenceur : grande position");
+
+    on[2] = false;                                                  // pas 2 désactivé : il garde la hauteur du pas 1
+    s = bbdres::sequencerState (2.4, 4, v, on, 0.0f);
+    check (s.index == 2 && s.cur == 7.0f, "sequenceur : un pas desactive garde la hauteur precedente");
+    for (bool& b : on) b = false;                                   // tout désactivé : décalage nul
+    s = bbdres::sequencerState (3.2, 8, v, on, 0.0f);
+    check (s.cur == 0.0f && s.prev == 0.0f, "sequenceur : tout desactive");
+    for (bool& b : on) b = true;
+
+    s = bbdres::sequencerState (1.25, 4, v, on, 0.5f);              // glide 50 % : à 25 % du pas, on est à mi-chemin
+    check (std::fabs (s.t - 0.5f) < 1.0e-5f && s.prev == 0.0f && s.cur == 7.0f, "sequenceur : glissando a mi-chemin");
+    s = bbdres::sequencerState (1.8, 4, v, on, 0.5f);
+    check (s.t == 1.0f, "sequenceur : glissando termine");
+    s = bbdres::sequencerState (1.0, 1, v, on, 1.0f);               // longueur 1 : aucun mouvement
+    check (s.prev == s.cur, "sequenceur : longueur 1");
+
+    check (std::fabs (bbdres::seqStepBeats (5, 4.0) - 1.0) < 1.0e-9, "duree : 1/4 = 1 temps");
+    check (std::fabs (bbdres::seqStepBeats (2, 4.0) - 0.5) < 1.0e-9, "duree : 1/8 = 1/2 temps");
+    check (std::fabs (bbdres::seqStepBeats (9, 4.0) - 2.0) < 1.0e-9, "duree : 1/2 mesure en 4/4");
+    check (std::fabs (bbdres::seqStepBeats (9, 3.0) - 1.5) < 1.0e-9, "duree : 1/2 mesure en 3/4");
+    check (std::fabs (bbdres::seqStepBeats (12, 4.0) - 16.0) < 1.0e-9, "duree : 4 mesures en 4/4");
+    check (std::fabs (bbdres::seqStepBeats (12, 3.0) - 12.0) < 1.0e-9, "duree : 4 mesures en 3/4");
+    check (bbdres::kNumSeqSteps == 13, "nombre de durees de pas");
+    std::printf ("sequenceur : %d durees de pas, de %s a %s\n", bbdres::kNumSeqSteps, bbdres::kSeqSteps[0].name, bbdres::kSeqSteps[bbdres::kNumSeqSteps - 1].name);
+}
+
 // Pas de clic quand le BBD quitte zéro (le filtre ne doit pas s'enclencher d'un coup)
 static void testBbdClick()
 {
@@ -681,6 +721,7 @@ int main()
     testHoldFilter();
     testResponseModel();
     testPultec();
+    testSequencer();
     testNoiseAndBbd();
     testBbdClick();
     for (float cr : { 0.25f, 0.5f, 1.0f })
