@@ -2,6 +2,7 @@
 
 #include <juce_audio_processors/juce_audio_processors.h>
 #include <juce_gui_basics/juce_gui_basics.h>
+#include <array>
 #include "BBDLookAndFeel.h"
 #include "../Params.h"
 #include "../PluginProcessor.h"
@@ -11,38 +12,39 @@
 // Vues de l'interface : clavier de gamme et courbe de réponse du résonateur.
 namespace bbdui
 {
-// Deux octaves de clavier : les notes de la gamme choisie sont éclairées, la tonique est plus vive,
-// la note jouée (Tune, quantifiée si Quantize est actif) porte un point. Un clic règle Tune.
+// Trois octaves de clavier, centrées sur l'octave de Tune. Les notes de la gamme choisie sont éclairées,
+// la tonique est plus vive. Un point glisse avec la hauteur RÉELLE du résonateur (LFO, quantification,
+// glissando), et chaque note visitée laisse une trace qui s'estompe. Affichage seul : pas de souris.
 class KeyboardView : public juce::Component, private juce::Timer
 {
 public:
-    explicit KeyboardView (juce::AudioProcessorValueTreeState& a)
-        : tuneParam (*a.getParameter (ParamIDs::tune)), tuneAttach (tuneParam, [] (float) {})
+    KeyboardView (juce::AudioProcessorValueTreeState& a, BBDResAudioProcessor& p) : proc (p)
     {
         tuneP = a.getRawParameterValue (ParamIDs::tune);
         rootP = a.getRawParameterValue (ParamIDs::root);
         scaleP = a.getRawParameterValue (ParamIDs::scale);
-        quantP = a.getRawParameterValue (ParamIDs::quantize);
-        startTimerHz (15);
+        glow.fill (0.0f);
+        setInterceptsMouseClicks (false, false);
+        startTimerHz (30);
     }
 
     void paint (juce::Graphics& g) override
     {
         const State s = readState();
-        const float w = (float) getWidth() / 14.0f, h = (float) getHeight();
+        const float w = (float) getWidth() / 21.0f, h = (float) getHeight();
         static const int whiteSemis[7] = { 0, 2, 4, 5, 7, 9, 11 };
         static const int blackSemis[5] = { 1, 3, 6, 8, 10 };
         static const int blackAfter[5] = { 0, 1, 3, 4, 5 };
 
-        for (int i = 0; i < 14; ++i)
+        for (int i = 0; i < 21; ++i)
         {
             const int note = s.start + (i / 7) * 12 + whiteSemis[i % 7];
             const auto key = juce::Rectangle<float> ((float) i * w + 1.0f, 0.0f, w - 2.0f, h);
             g.setColour (keyColour (s, note, false));
             g.fillRoundedRectangle (key, 2.0f);
-            if (note == s.played) drawMarker (g, key.getCentreX(), h - 9.0f);
+            drawTrace (g, key, note - s.start);
         }
-        for (int oct = 0; oct < 2; ++oct)
+        for (int oct = 0; oct < 3; ++oct)
             for (int j = 0; j < 5; ++j)
             {
                 const int note = s.start + oct * 12 + blackSemis[j];
@@ -51,88 +53,72 @@ public:
                 const auto key = juce::Rectangle<float> (x, 0.0f, bw, h * 0.62f);
                 g.setColour (keyColour (s, note, true));
                 g.fillRoundedRectangle (key, 2.0f);
-                if (note == s.played) drawMarker (g, key.getCentreX(), key.getBottom() - 8.0f);
+                drawTrace (g, key, note - s.start);
             }
+
+        // le point : hauteur réelle du résonateur, glissante ou par bonds selon la quantification
+        const float rel = juce::jlimit (0.0f, 35.0f, proc.uiPitch.load() - (float) s.start);
+        const int k0 = (int) std::floor (rel);
+        const int k1 = juce::jmin (35, k0 + 1);
+        const float x = centreX (k0, w) + (centreX (k1, w) - centreX (k0, w)) * (rel - (float) k0);
+        g.setColour (kText);
+        g.fillEllipse (x - 5.0f, h - 13.0f, 10.0f, 10.0f);
+        g.setColour (kBg);
+        g.fillEllipse (x - 3.0f, h - 11.0f, 6.0f, 6.0f);
     }
 
-    void mouseDown (const juce::MouseEvent& e) override { pick (e); }
-    void mouseDrag (const juce::MouseEvent& e) override { pick (e); }
-
 private:
-    struct State { int start, played, root; unsigned mask; bool quant; };
+    struct State { int start, root; unsigned mask; };
 
     State readState() const
     {
         State s;
-        const float tune = tuneP->load();
         s.root = juce::jlimit (0, 11, juce::roundToInt (rootP->load()));
         s.mask = bbdres::kScales[juce::jlimit (0, bbdres::kNumScales - 1, juce::roundToInt (scaleP->load()))].mask;
-        s.quant = quantP->load() > 0.5f;
-        s.played = s.quant ? juce::roundToInt (bbdres::quantizeToScale (tune, s.root, s.mask)) : juce::roundToInt (tune);
-        s.start = 12 * (int) std::floor ((float) s.played / 12.0f);
+        s.start = 12 * (int) std::floor (tuneP->load() / 12.0f) - 12;   // l'octave de Tune au centre
         return s;
     }
 
-    static bool inScale (const State& s, int note)
+    // abscisse du centre d'une touche, en unités de touches blanches (les noires sont entre deux blanches)
+    static float centreX (int k, float w)
     {
-        const int degree = (((note - s.root) % 12) + 12) % 12;
-        return ((s.mask >> degree) & 1u) != 0u;
+        static const float posInOctave[12] = { 0.5f, 1.0f, 1.5f, 2.0f, 2.5f, 3.5f, 4.0f, 4.5f, 5.0f, 5.5f, 6.0f, 6.5f };
+        return ((float) (k / 12) * 7.0f + posInOctave[k % 12]) * w;
     }
 
     static juce::Colour keyColour (const State& s, int note, bool black)
     {
-        const bool isRoot = (((note - s.root) % 12) + 12) % 12 == 0;
-        if (inScale (s, note))
-            return isRoot ? kAmber.brighter (0.35f) : (black ? kAmber.darker (0.35f) : kAmber);
+        const int degree = (((note - s.root) % 12) + 12) % 12;
+        if (((s.mask >> degree) & 1u) != 0u)
+            return degree == 0 ? kAmber.brighter (0.35f) : (black ? kAmber.darker (0.35f) : kAmber);
         return black ? juce::Colour (0xff2a2d31) : juce::Colour (0xffcfc9ba);
     }
 
-    static void drawMarker (juce::Graphics& g, float cx, float cy)
+    void drawTrace (juce::Graphics& g, juce::Rectangle<float> key, int index) const
     {
-        g.setColour (kText);
-        g.fillEllipse (cx - 5.0f, cy - 5.0f, 10.0f, 10.0f);
-        g.setColour (kBg);
-        g.fillEllipse (cx - 3.0f, cy - 3.0f, 6.0f, 6.0f);
-    }
-
-    void pick (const juce::MouseEvent& e)
-    {
-        const State s = readState();
-        const float w = (float) getWidth() / 14.0f, h = (float) getHeight();
-        static const int whiteSemis[7] = { 0, 2, 4, 5, 7, 9, 11 };
-        static const int blackSemis[5] = { 1, 3, 6, 8, 10 };
-        static const int blackAfter[5] = { 0, 1, 3, 4, 5 };
-        int note = -1;
-        if ((float) e.y < h * 0.62f)   // les touches noires d'abord : elles sont au-dessus
-            for (int oct = 0; oct < 2 && note < 0; ++oct)
-                for (int j = 0; j < 5; ++j)
-                {
-                    const float bw = w * 0.62f, x = (float) (blackAfter[j] + oct * 7 + 1) * w - bw * 0.5f;
-                    if ((float) e.x >= x && (float) e.x < x + bw) { note = s.start + oct * 12 + blackSemis[j]; break; }
-                }
-        if (note < 0)
-        {
-            const int i = juce::jlimit (0, 13, (int) ((float) e.x / w));
-            note = s.start + (i / 7) * 12 + whiteSemis[i % 7];
-        }
-        tuneAttach.setValueAsCompleteGesture (tuneParam.convertFrom0to1 (tuneParam.convertTo0to1 ((float) note)));
-        repaint();
+        if (index < 0 || index >= 36) return;
+        const float gl = glow[(size_t) index];
+        if (gl < 0.03f) return;
+        g.setColour (kText.withAlpha (0.8f * gl));
+        g.fillRoundedRectangle (key, 2.0f);
     }
 
     void timerCallback() override
     {
         const State s = readState();
-        const int stamp = s.played * 4096 + s.root * 256 + (int) (s.mask & 0xffu) + (s.quant ? 1 << 20 : 0) + (int) ((s.mask >> 8) << 24);
-        if (stamp != lastStamp) { lastStamp = stamp; repaint(); }
+        if (s.start != lastStart) { glow.fill (0.0f); lastStart = s.start; }
+        const int idx = juce::roundToInt (proc.uiPitch.load()) - s.start;
+        if (idx >= 0 && idx < 36) glow[(size_t) idx] = 1.0f;
+        for (auto& v : glow) v *= 0.94f;   // la trace s'éteint en environ une demi-seconde
+        repaint();
     }
 
-    juce::RangedAudioParameter& tuneParam;
-    juce::ParameterAttachment tuneAttach;
+    BBDResAudioProcessor& proc;
     std::atomic<float>* tuneP = nullptr;
     std::atomic<float>* rootP = nullptr;
     std::atomic<float>* scaleP = nullptr;
-    std::atomic<float>* quantP = nullptr;
-    int lastStamp = -1;
+    std::array<float, 36> glow;
+    int lastStart = -1000;
 };
 
 // Courbe de réponse du résonateur (sortie humide) : pics aux multiples de la note, creusés par
@@ -148,6 +134,8 @@ public:
         inP = a.getRawParameterValue (ParamIDs::inputLP);
         loopP = a.getRawParameterValue (ParamIDs::loopLP);
         bbdP = a.getRawParameterValue (ParamIDs::bbd);
+        lowP = a.getRawParameterValue (ParamIDs::lowCut);
+        pultecP = a.getRawParameterValue (ParamIDs::pultec);
         startTimerHz (20);
     }
 
@@ -190,6 +178,8 @@ public:
         rp.inputLpHz = inP->load();
         rp.loopLpHz = loopP->load();
         rp.bbd = bbdP->load();
+        rp.lowCutHz = lowP->load();
+        rp.lowCutAmt = pultecP->load();
         const double sr = proc.getSampleRate();
         rp.fs = sr > 8000.0 ? (float) sr : 48000.0f;
         bbdres::ResponseModel model;
@@ -226,7 +216,7 @@ private:
     void timerCallback() override
     {
         const float stamp = tuneP->load() * 1000.0f + fineP->load() * 3.0f + fbP->load() * 71.0f
-                          + std::log2 (inP->load()) * 13.0f + std::log2 (loopP->load()) * 17.0f + bbdP->load() * 29.0f
+                          + std::log2 (inP->load()) * 13.0f + std::log2 (loopP->load()) * 17.0f + bbdP->load() * 29.0f + lowP->load() * 0.7f + pultecP->load() * 37.0f
                           + (float) proc.getSampleRate() * 0.001f;
         if (std::abs (stamp - lastStamp) > 1.0e-4f) { lastStamp = stamp; repaint(); }
     }
@@ -238,6 +228,8 @@ private:
     std::atomic<float>* inP = nullptr;
     std::atomic<float>* loopP = nullptr;
     std::atomic<float>* bbdP = nullptr;
+    std::atomic<float>* lowP = nullptr;
+    std::atomic<float>* pultecP = nullptr;
     float lastStamp = -1.0e9f;
 };
 } // namespace bbdui
