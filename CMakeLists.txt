@@ -38,6 +38,9 @@ target_sources(BBDResV2 PRIVATE
     Source/Dsp/Response.h
     Source/Dsp/Sequencer.h
     Source/UI/StepGrid.h
+    Source/UI/PresetBar.h
+    Source/Presets.h
+    Source/FactoryPresets.h
     Source/Params.h
     Source/Dsp/Resonator.h
     Source/Dsp/Pitch.h
