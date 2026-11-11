@@ -38,6 +38,7 @@ BBDResAudioProcessor::BBDResAudioProcessor()
         stepP[i]   = apvts.getRawParameterValue (ParamIDs::kStepIDs[i]);
         stepOnP[i] = apvts.getRawParameterValue (ParamIDs::kStepOnIDs[i]);
     }
+    presets = std::make_unique<bbdpresets::PresetManager> (apvts);
     lfoPhaseP  = apvts.getRawParameterValue (ParamIDs::lfoPhase);
     rootP      = apvts.getRawParameterValue (ParamIDs::root);
     scaleP     = apvts.getRawParameterValue (ParamIDs::scale);
