@@ -5,6 +5,7 @@
 #include "Dsp/Pitch.h"
 #include "Dsp/Modulation.h"
 #include "Dsp/Sequencer.h"
+#include "Presets.h"
 
 class BBDResAudioProcessor : public juce::AudioProcessor
 {
@@ -36,6 +37,7 @@ public:
     void setStateInformation (const void* data, int sizeInBytes) override;
 
     juce::AudioProcessorValueTreeState apvts;
+    std::unique_ptr<bbdpresets::PresetManager> presets;   // presets généraux et de séquence, A/B
     std::atomic<float> uiBpm { 120.0f };   // tempo de l'hôte, lu par l'interface (affichage de la division)
     std::atomic<int> uiSeqStep { -1 };     // pas en cours du séquenceur (-1 = arrêté), lu par l'interface
     std::atomic<float> uiPitch { 48.0f };  // hauteur réelle du résonateur (LFO, quantification), lue par l'interface
