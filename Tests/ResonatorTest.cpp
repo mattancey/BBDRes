@@ -4,6 +4,8 @@
 #include "../Source/Dsp/Modulation.h"
 #include "../Source/Dsp/Response.h"
 #include "../Source/Dsp/Sequencer.h"
+#include "../Source/FactoryPresets.h"
+#include <map>
 #include <cstdio>
 #include <string>
 #include <cstdlib>
@@ -542,6 +544,44 @@ static void testSequencer()
     std::printf ("sequenceur : %d durees de pas, de %s a %s\n", bbdres::kNumSeqSteps, bbdres::kSeqSteps[0].name, bbdres::kSeqSteps[bbdres::kNumSeqSteps - 1].name);
 }
 
+// Presets d'usine : noms uniques, identifiants connus, valeurs dans la plage de leur réglage
+static void testFactoryPresets()
+{
+    const std::map<std::string, std::pair<float, float>> range = {
+        { "drive", { 0, 1 } }, { "driveCurve", { 0, 2 } }, { "inputLP", { 200, 20000 } }, { "tune", { 24, 96 } }, { "fine", { -100, 100 } },
+        { "feedback", { 0, 1 } }, { "loopLP", { 200, 20000 } }, { "lowCut", { 20, 600 } }, { "pultec", { 0, 1 } }, { "loopDyn", { -1, 1 } },
+        { "bbd", { 0, 1 } }, { "noise", { 0, 1 } }, { "freeze", { 0, 1 } }, { "holdLen", { 0, 1 } }, { "holdQuant", { 0, 1 } }, { "holdMix", { 0, 1 } },
+        { "holdHP", { 20, 20000 } }, { "holdLP", { 20, 20000 } }, { "root", { 0, 11 } }, { "scale", { 0, 11 } }, { "quantize", { 0, 1 } },
+        { "lfoShape", { 0, 5 } }, { "lfoSync", { 0, 11 } }, { "lfoRate", { 0.02f, 20 } }, { "lfoPhase", { 0, 1 } }, { "lfoDepth", { 0, 1 } },
+        { "lfoTarget", { 0, 2 } }, { "drift", { 0, 1 } }, { "spread", { 0, 1 } }, { "cross", { 0, 1 } }, { "mix", { 0, 1 } }, { "outLevel", { -24, 12 } },
+        { "seqOn", { 0, 1 } }, { "seqLength", { 1, 16 } }, { "seqStep", { 0, (float) bbdres::kNumSeqSteps - 1 } }, { "seqQuant", { 0, 1 } }, { "seqGlide", { 0, 1 } } };
+    int total = 0;
+    for (int kind = 0; kind < 2; ++kind)
+    {
+        const auto& list = kind == 0 ? bbdpresets::generalFactory() : bbdpresets::sequenceFactory();
+        std::map<std::string, int> names;
+        for (const auto& p : list)
+        {
+            check (p.name != nullptr && std::string (p.name).size() > 0, "preset : nom vide");
+            check (++names[p.name] == 1, "preset : nom en double");
+            for (const auto& pv : p.values)
+            {
+                ++total;
+                const std::string id (pv.id);
+                float lo = 0, hi = 0; bool known = false;
+                if (id.rfind ("stepOn", 0) == 0) { lo = 0; hi = 1; known = true; }
+                else if (id.rfind ("step", 0) == 0) { lo = -24; hi = 24; known = true; }
+                else { const auto it = range.find (id); if (it != range.end()) { lo = it->second.first; hi = it->second.second; known = true; } }
+                check (known, "preset : identifiant de reglage inconnu");
+                check (pv.value >= lo && pv.value <= hi, "preset : valeur hors plage");
+                if (kind == 1) check (id == "seqLength" || id == "seqStep" || id == "seqGlide" || id == "seqQuant" || id.rfind ("step", 0) == 0, "preset de sequence : reglage etranger a la sequence");
+            }
+        }
+    }
+    std::printf ("presets d'usine : %zu generaux, %zu de sequence, %d valeurs verifiees\n",
+                 bbdpresets::generalFactory().size(), bbdpresets::sequenceFactory().size(), total);
+}
+
 // Pas de clic quand le BBD quitte zéro (le filtre ne doit pas s'enclencher d'un coup)
 static void testBbdClick()
 {
@@ -722,6 +762,7 @@ int main()
     testResponseModel();
     testPultec();
     testSequencer();
+    testFactoryPresets();
     testNoiseAndBbd();
     testBbdClick();
     for (float cr : { 0.25f, 0.5f, 1.0f })
