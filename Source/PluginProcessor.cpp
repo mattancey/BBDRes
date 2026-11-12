@@ -260,6 +260,11 @@ juce::AudioProcessorValueTreeState::ParameterLayout BBDResAudioProcessor::create
         juce::ParameterID { ParamIDs::outLevel, 1 }, "Level",
         Range (-24.0f, 12.0f, 0.1f), 0.0f, Attr().withLabel ("dB")));
 
+    // Fondu entre presets généraux et entre A et B (réglage global : les presets ne le modifient pas)
+    layout.add (std::make_unique<juce::AudioParameterFloat> (
+        juce::ParameterID { ParamIDs::presetFade, 1 }, "Preset Fade",
+        Range (0.0f, 5.0f, 0.05f), 0.5f, Attr().withStringFromValueFunction ([] (float v, int) { return juce::String (v, 2) + " s"; })));
+
     return layout;
 }
 
@@ -345,6 +350,7 @@ void BBDResAudioProcessor::prepareToPlay (double sampleRate, int)
     driftFilterLfo[0].prepare (controlRate, 37u); driftFilterLfo[0].setRateHz (0.51f);
     driftFilterLfo[1].prepare (controlRate, 41u); driftFilterLfo[1].setRateHz (0.61f);
     env.prepare (controlRate);
+    noiseGate.prepare (controlRate);
 
     const auto t = readTargets();
     tuneSm.snap (t.tune + t.fine * 0.01f);
@@ -429,7 +435,9 @@ void BBDResAudioProcessor::processBlock (juce::AudioBuffer<float>& buffer, juce:
         for (int c = 0; c < numCh; ++c)
             for (int i = 0; i < len; ++i)
                 acc += std::abs (data[c][start + i]);
-        const float envUnit = bbdres::levelToUnit (env.next (acc / (float) (len * numCh)));
+        const float envLevel = env.next (acc / (float) (len * numCh));
+        const float envUnit = bbdres::levelToUnit (envLevel);
+        const float noiseGateGain = noiseGate.next (envLevel);   // le souffle ne tourne que si l'entrée dépasse -40 dB
 
         float lfoRaw;
         if (t.lfoSync == 0)
@@ -521,6 +529,7 @@ void BBDResAudioProcessor::processBlock (juce::AudioBuffer<float>& buffer, juce:
         rp.lowCutAmt = pultecSm.next (t.pultec);
         rp.holdLpHz  = std::exp2 (holdLpSm.next (t.holdLpLog2));
         rp.noise     = noiseSm.next (t.noise);
+        rp.noiseGate = noiseGateGain;
         rp.freeze    = t.freeze ? 1.0f : 0.0f;   // front montant = fige le son
         const float crossAmt = crossSm.next (t.cross);
         rp.cross     = numCh > 1 ? crossAmt : 0.0f;
