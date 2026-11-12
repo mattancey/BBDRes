@@ -109,6 +109,7 @@ private:
                      noiseSm, spreadSm, crossSm, holdHpSm, holdLpSm, lowCutSm, pultecSm;
     bbdres::Lfo lfo, driftTuneLfo[2], driftFilterLfo[2];
     bbdres::EnvFollower env;
+    bbdres::NoiseGate noiseGate;
     float mixPrev = 0.5f, levelPrev = 1.0f;
 
     JUCE_DECLARE_NON_COPYABLE_WITH_LEAK_DETECTOR (BBDResAudioProcessor)
