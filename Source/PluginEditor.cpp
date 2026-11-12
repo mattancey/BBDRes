@@ -4,6 +4,7 @@
 #include "UI/Views.h"
 #include "UI/StepGrid.h"
 #include "UI/PresetBar.h"
+#include "UI/SeqSlots.h"
 
 namespace
 {
@@ -101,8 +102,9 @@ public:
         add<Knob> (a, ParamIDs::seqLength, "STEPS").setBounds (124, 794, 64, 88);
         add<ChoiceBox> (a, ParamIDs::seqStep, "STEP").setBounds (200, 806, 100, 42);
         add<ToggleBox> (a, ParamIDs::seqQuant, "Q SCALE").setBounds (310, 810, 64, 32);
-        add<Knob> (a, ParamIDs::seqGlide, "GLIDE").setBounds (382, 794, 64, 88);
-        add<StepGrid> (a, proc).setBounds (456, 752, 800, 130);
+        add<SeqSlotButtons> (*proc.presets).setBounds (386, 806, 84, 64);
+        add<Knob> (a, ParamIDs::seqGlide, "GLIDE").setBounds (484, 794, 64, 88);
+        add<StepGrid> (a, proc).setBounds (558, 752, 698, 130);
 
         // --- Presets généraux et A/B ---
         add<PresetBar> (*proc.presets, bbdpresets::Kind::General, true).setBounds (250, 22, 760, 32);
@@ -159,6 +161,11 @@ public:
         panel (g, { 16, 608, 986, 118 }, "HOLD - LOOPER");
         panel (g, { 1014, 608, 250, 118 }, "OUTPUT");
         panel (g, { 16, 738, 1248, 150 }, "SEQUENCEUR DE PITCH");
+
+        // Légende des mémoires de séquence (clic court = rappel, clic long = mémorise)
+        g.setColour (kMuted);
+        g.setFont (font (9.0f));
+        g.drawText ("MEMORY", 386, 790, 84, 12, juce::Justification::centred);
 
         // Zones réservées pour les fonctions à venir
         dashedBox (g, { 16.0f, 384.0f, 270.0f, 212.0f }, u8 ("RÉSERVÉ - NOUVELLES FONCTIONS"));
