@@ -4,6 +4,7 @@
 #include <juce_gui_basics/juce_gui_basics.h>
 #include "BBDLookAndFeel.h"
 #include "../Presets.h"
+#include "../Params.h"
 
 namespace bbdui
 {
@@ -55,6 +56,17 @@ public:
                 addAndMakeVisible (*b);
             }
             addAndMakeVisible (copyButton);
+
+            // Fondu entre presets généraux et entre A et B : de 0 à 5 s (réglage global)
+            fadeSlider.setSliderStyle (juce::Slider::RotaryHorizontalVerticalDrag);
+            fadeSlider.setTextBoxStyle (juce::Slider::NoTextBox, false, 0, 0);
+            fadeSlider.setRotaryParameters (juce::MathConstants<float>::pi * 1.2f, juce::MathConstants<float>::pi * 2.8f, true);
+            addAndMakeVisible (fadeSlider);
+            fadeLabel.setJustificationType (juce::Justification::centredLeft);
+            addAndMakeVisible (fadeLabel);
+            fadeAttachment = std::make_unique<juce::AudioProcessorValueTreeState::SliderAttachment> (manager.state(), ParamIDs::presetFade, fadeSlider);
+            fadeSlider.onValueChange = [this] { updateFadeLabel(); };
+            updateFadeLabel();
             aButton.onClick = [this] { if (aButton.getToggleState()) manager.switchSlot (0); };
             bButton.onClick = [this] { if (bButton.getToggleState()) manager.switchSlot (1); };
             copyButton.onClick = [this] { manager.copyToOtherSlot(); };
@@ -67,6 +79,8 @@ public:
         auto r = getLocalBounds();
         if (showAB)
         {
+            fadeLabel.setBounds (r.removeFromRight (74));
+            fadeSlider.setBounds (r.removeFromRight (30)); r.removeFromRight (8);
             copyButton.setBounds (r.removeFromRight (62)); r.removeFromRight (6);
             bButton.setBounds (r.removeFromRight (36));    r.removeFromRight (4);
             aButton.setBounds (r.removeFromRight (36));    r.removeFromRight (10);
@@ -79,6 +93,11 @@ public:
     }
 
 private:
+    void updateFadeLabel()
+    {
+        fadeLabel.setText ("FADE " + juce::String (fadeSlider.getValue(), 1) + " s", juce::dontSendNotification);
+    }
+
     // reconstruit la liste : presets d'usine (1..), puis presets de l'utilisateur (1000..)
     void refresh()
     {
@@ -138,5 +157,8 @@ private:
     juce::StringArray factoryNames, userNames;
     juce::ComboBox combo;
     juce::TextButton prevButton, nextButton, saveButton, deleteButton, aButton, bButton, copyButton;
+    juce::Slider fadeSlider;
+    juce::Label fadeLabel;
+    std::unique_ptr<juce::AudioProcessorValueTreeState::SliderAttachment> fadeAttachment;
 };
 } // namespace bbdui
