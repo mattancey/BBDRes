@@ -125,6 +125,33 @@ inline float syncedPhase (double ppq, float beatsPerCycle)
     return (float) (c - std::floor (c));
 }
 
+// Porte du souffle : s'ouvre quand le niveau d'entrée dépasse -40 dB (attaque de 0,2 s), se referme
+// sous -42 dB (release de 0,5 s). Sans signal, le souffle ne tourne donc pas dans le vide.
+struct NoiseGate
+{
+    static constexpr float kOpenDb = -40.0f;
+    static constexpr float kCloseDb = -42.0f;   // petite hystérésis : pas de battement autour du seuil
+    float gain = 0.0f;
+    bool open = false;
+    float attackStep = 0.001f, releaseStep = 0.001f;
+
+    void prepare (float controlRate)
+    {
+        attackStep = 1.0f / (0.20f * controlRate);
+        releaseStep = 1.0f / (0.50f * controlRate);
+        gain = 0.0f;
+        open = false;
+    }
+    float next (float level)   // level : niveau d'entrée linéaire ; renvoie le gain 0..1
+    {
+        const float db = 20.0f * std::log10 (std::max (level, 1.0e-6f));
+        if (! open && db >= kOpenDb) open = true;
+        else if (open && db < kCloseDb) open = false;
+        gain = open ? std::min (1.0f, gain + attackStep) : std::max (0.0f, gain - releaseStep);
+        return gain;
+    }
+};
+
 // Suiveur d'enveloppe : attaque 10 ms, relâchement 200 ms
 struct EnvFollower
 {
