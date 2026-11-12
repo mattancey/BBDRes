@@ -169,6 +169,7 @@ struct ResonatorParams
     float holdSpeedSemis = 0.0f; // petite variation de vitesse de lecture (dérive de la mémoire)
     float holdHpHz = 20.0f;    // passe-haut 12 dB du looper uniquement (20 Hz = ouvert)
     float holdLpHz = 20000.0f; // passe-bas 12 dB du looper uniquement (20 kHz = ouvert)
+    float noiseGate = 1.0f;    // porte du souffle : 0 = fermée, 1 = ouverte (pilotée par le niveau d'entrée)
     float lowCutHz = 80.0f;    // atténuateur de graves « Pultec » dans la boucle : fréquence
     float lowCutAmt = 0.0f;    // 0 = transparent (SOFT) ... 1 = passe-haut 6 dB (HP)
     float noiseGain = 1.0f;    // réglage interne : multiplicateur du souffle
@@ -278,7 +279,7 @@ public:
             pd += -std::arg (1.0f - lowAmt * lp1) / w;
         }
         const float nz = std::clamp (p.noise, 0.0f, 1.0f);
-        noiseAmp = 0.0025f * nz * nz * p.noiseGain;      // souffle injecté dans la ligne BBD
+        noiseAmp = 0.0025f * nz * nz * p.noiseGain * std::clamp (p.noiseGate, 0.0f, 1.0f);      // souffle injecté dans la ligne BBD
         jitterAmt = 0.00025f * bbdAmt * p.jitterGain;    // grain d'horloge
 
         // Couplage entre canaux : le chemin croisé a un échantillon de retard en plus, on le compense
