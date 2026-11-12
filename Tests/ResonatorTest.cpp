@@ -582,6 +582,35 @@ static void testFactoryPresets()
                  bbdpresets::generalFactory().size(), bbdpresets::sequenceFactory().size(), total);
 }
 
+// Porte du souffle : seuil -40 dB, attaque 0,2 s, release 0,5 s
+static void testNoiseGate()
+{
+    const float cr = 3000.0f;
+    bbdres::NoiseGate g; g.prepare (cr);
+    auto run = [&] (float level, float seconds) { float v = 0.0f; for (int i = 0; i < (int) (seconds * cr); ++i) v = g.next (level); return v; };
+    const float dB30 = std::pow (10.0f, -30.0f / 20.0f), dB50 = std::pow (10.0f, -50.0f / 20.0f), dB41 = std::pow (10.0f, -41.0f / 20.0f);
+    check (run (dB50, 1.0f) == 0.0f, "gate : ouvert sans signal");
+    const float half = run (dB30, 0.1f);
+    check (std::fabs (half - 0.5f) < 0.02f, "gate : attaque pas lineaire sur 0,2 s");
+    check (run (dB30, 0.11f) == 1.0f, "gate : attaque trop lente");
+    check (run (dB41, 1.0f) == 1.0f, "gate : l'hysteresis ne maintient pas la porte ouverte entre -40 et -42 dB");
+    const float rel = run (dB50, 0.25f);
+    check (std::fabs (rel - 0.5f) < 0.03f, "gate : release pas lineaire sur 0,5 s");
+    check (run (dB50, 0.3f) == 0.0f, "gate : release trop lente");
+    check (run (dB41, 1.0f) == 0.0f, "gate : l'hysteresis ouvre la porte sous -40 dB");
+    // dans le résonateur : porte fermée = silence, porte ouverte = souffle
+    auto noiseRms = [&] (float gate)
+    {
+        Resonator r; r.prepare (48000.0f);
+        ResonatorParams p; p.noise = 1.0f; p.feedback = 0.5f; p.noiseGate = gate;
+        r.update (p); r.reset();
+        double s = 0.0; for (int i = 0; i < 24000; ++i) { const float y = r.process (0.0f); s += (double) y * y; }
+        return (float) std::sqrt (s / 24000.0);
+    };
+    check (noiseRms (0.0f) == 0.0f && noiseRms (1.0f) > 0.0f, "gate : le souffle ne suit pas la porte");
+    std::printf ("porte du souffle : attaque 0,2 s, release 0,5 s, seuil -40 dB verifies\n");
+}
+
 // Pas de clic quand le BBD quitte zéro (le filtre ne doit pas s'enclencher d'un coup)
 static void testBbdClick()
 {
@@ -763,6 +792,7 @@ int main()
     testPultec();
     testSequencer();
     testFactoryPresets();
+    testNoiseGate();
     testNoiseAndBbd();
     testBbdClick();
     for (float cr : { 0.25f, 0.5f, 1.0f })
