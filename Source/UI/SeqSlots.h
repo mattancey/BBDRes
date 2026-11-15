@@ -7,7 +7,7 @@
 
 namespace bbdui
 {
-// Quatre mémoires de séquence, en boutons 2 x 2.
+// Quatre mémoires de séquence, en une rangée de boutons.
 //  - clic court : rappelle la séquence mémorisée (les pas, la longueur, la durée, le glide, Q SCALE) ;
 //  - clic long (0,5 s) : mémorise la séquence en cours ; le bouton scintille pour le confirmer.
 // Un bouton plein (ambre) contient une séquence, un bouton creux est vide.
@@ -58,8 +58,9 @@ public:
 private:
     juce::Rectangle<int> cell (int i) const
     {
-        const int w = (getWidth() - 4) / 2, h = (getHeight() - 4) / 2;
-        return { (i % 2) * (w + 4), (i / 2) * (h + 4), w, h };
+        const int gap = 4;
+        const int w = (getWidth() - 3 * gap) / bbdpresets::kNumSeqSlots;
+        return { i * (w + gap), 0, w, getHeight() };
     }
 
     int cellAt (juce::Point<int> p) const
