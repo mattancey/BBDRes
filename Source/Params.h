@@ -49,6 +49,12 @@ inline constexpr const char* kStepIDs[16]   = { "step1", "step2", "step3", "step
                                                 "step9", "step10", "step11", "step12", "step13", "step14", "step15", "step16" };
 inline constexpr const char* kStepOnIDs[16] = { "stepOn1", "stepOn2", "stepOn3", "stepOn4", "stepOn5", "stepOn6", "stepOn7", "stepOn8",
                                                 "stepOn9", "stepOn10", "stepOn11", "stepOn12", "stepOn13", "stepOn14", "stepOn15", "stepOn16" };
+// Résonateurs : 4 voix en parallèle (allumée, intervalle par rapport à Tune, niveau, balance, solo)
+inline constexpr const char* kVoiceOnIDs[4]   = { "r1On", "r2On", "r3On", "r4On" };
+inline constexpr const char* kVoiceIntIDs[4]  = { "r1Int", "r2Int", "r3Int", "r4Int" };
+inline constexpr const char* kVoiceLvlIDs[4]  = { "r1Lvl", "r2Lvl", "r3Lvl", "r4Lvl" };
+inline constexpr const char* kVoicePanIDs[4]  = { "r1Pan", "r2Pan", "r3Pan", "r4Pan" };
+inline constexpr const char* kVoiceSoloIDs[4] = { "r1Solo", "r2Solo", "r3Solo", "r4Solo" };
 // Global (jamais modifié par un preset)
 inline constexpr const char* presetFade = "presetFade";  // durée du fondu entre presets généraux et entre A et B, 0..5 s
 // Output
