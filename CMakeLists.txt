@@ -37,6 +37,7 @@ target_sources(BBDResV2 PRIVATE
     Source/UI/Views.h
     Source/Dsp/Response.h
     Source/Dsp/Sequencer.h
+    Source/Dsp/Voices.h
     Source/UI/StepGrid.h
     Source/UI/PresetBar.h
     Source/UI/SeqSlots.h
