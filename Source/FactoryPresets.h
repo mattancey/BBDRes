@@ -80,6 +80,21 @@ inline const std::vector<FactoryPreset>& generalFactory()
             { ParamIDs::drift, 0.5f }, { ParamIDs::spread, 0.5f }, { ParamIDs::holdLen, 0.62f }, { ParamIDs::holdMix, 1.0f },
             { ParamIDs::holdHP, 150.0f }, { ParamIDs::holdLP, 6000.0f }, { ParamIDs::mix, 0.45f } } });
 
+        // Accords : les voix R2 à R4 s'allument avec les intervalles et niveaux par défaut (+7, +12, -12)
+        v.push_back ({ "Open Fifths", {
+            { ParamIDs::kVoiceOnIDs[1], 1.0f }, { ParamIDs::kVoiceOnIDs[2], 1.0f }, { ParamIDs::feedback, 0.85f },
+            { ParamIDs::loopLP, 10000.0f }, { ParamIDs::bbd, 0.35f }, { ParamIDs::spread, 0.3f }, { ParamIDs::drift, 0.35f },
+            { ParamIDs::mix, 0.5f } } });
+
+        // Les voix suivent la gamme (Quantize) : do majeur, sus4, quinte, octave
+        v.push_back ({ "Sus Cloud", {
+            { ParamIDs::kVoiceOnIDs[1], 1.0f }, { ParamIDs::kVoiceIntIDs[1], 5.0f }, { ParamIDs::kVoiceLvlIDs[1], -3.0f }, { ParamIDs::kVoicePanIDs[1], -0.4f },
+            { ParamIDs::kVoiceOnIDs[2], 1.0f }, { ParamIDs::kVoiceIntIDs[2], 7.0f }, { ParamIDs::kVoiceLvlIDs[2], -5.0f }, { ParamIDs::kVoicePanIDs[2], 0.4f },
+            { ParamIDs::kVoiceOnIDs[3], 1.0f }, { ParamIDs::kVoiceIntIDs[3], 12.0f }, { ParamIDs::kVoiceLvlIDs[3], -6.0f }, { ParamIDs::kVoicePanIDs[3], 0.0f },
+            { ParamIDs::root, 0.0f }, { ParamIDs::scale, 1.0f }, { ParamIDs::quantize, 1.0f },
+            { ParamIDs::feedback, 0.8f }, { ParamIDs::loopLP, 9000.0f }, { ParamIDs::bbd, 0.3f }, { ParamIDs::drift, 0.4f },
+            { ParamIDs::spread, 0.35f }, { ParamIDs::mix, 0.5f } } });
+
         FactoryPreset arp { "Glass Arp", {
             { ParamIDs::tune, 60.0f }, { ParamIDs::feedback, 0.88f }, { ParamIDs::loopLP, 12000.0f }, { ParamIDs::bbd, 0.2f },
             { ParamIDs::root, 0.0f }, { ParamIDs::scale, 2.0f }, { ParamIDs::mix, 0.55f }, { ParamIDs::seqOn, 1.0f } } };
