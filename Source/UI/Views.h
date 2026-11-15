@@ -8,10 +8,14 @@
 #include "../PluginProcessor.h"
 #include "../Dsp/Pitch.h"
 #include "../Dsp/Response.h"
+#include "../Dsp/Voices.h"
 
 // Vues de l'interface : clavier de gamme et courbe de réponse du résonateur.
 namespace bbdui
 {
+// Couleur de chaque résonateur (R1 à R4) : bandeaux de l'interface et courbes de réponse
+inline const juce::Colour kVoiceColours[4] = { juce::Colour (0xfff2a33a), juce::Colour (0xff5fb3a1), juce::Colour (0xffa78bd6), juce::Colour (0xffe0806a) };
+
 // Deux octaves de clavier. Les notes de la gamme choisie sont éclairées, la tonique est plus vive.
 // Le point marque la note du réglage de Tune (calée sur la gamme si Quantize est actif).
 // Le balayage de la hauteur réelle (LFO, séquenceur, glissando) se lit par l'illumination : chaque
@@ -112,8 +116,13 @@ private:
     {
         const State s = readState();
         if (s.start != lastStart) { glow.fill (0.0f); lastStart = s.start; }
-        const int idx = juce::roundToInt (proc.uiPitch.load()) - s.start;
-        if (idx >= 0 && idx < 24) glow[(size_t) idx] = 1.0f;
+        for (int v = 0; v < bbdres::kNumVoices; ++v)   // une trace pour chaque voix (accord)
+        {
+            const float p = proc.uiPitchVoice[v].load();
+            if (p < 0.0f) continue;
+            const int idx = juce::roundToInt (p) - s.start;
+            if (idx >= 0 && idx < 24) glow[(size_t) idx] = 1.0f;
+        }
         for (auto& v : glow) v *= 0.94f;   // la trace s'éteint en environ une demi-seconde
         repaint();
     }
@@ -142,6 +151,15 @@ public:
         bbdP = a.getRawParameterValue (ParamIDs::bbd);
         lowP = a.getRawParameterValue (ParamIDs::lowCut);
         pultecP = a.getRawParameterValue (ParamIDs::pultec);
+        quantP = a.getRawParameterValue (ParamIDs::quantize);
+        rootP = a.getRawParameterValue (ParamIDs::root);
+        scaleP = a.getRawParameterValue (ParamIDs::scale);
+        for (int v = 0; v < bbdres::kNumVoices; ++v)
+        {
+            voiceOnP[v] = a.getRawParameterValue (ParamIDs::kVoiceOnIDs[v]);
+            voiceIntP[v] = a.getRawParameterValue (ParamIDs::kVoiceIntIDs[v]);
+            voiceSoloP[v] = a.getRawParameterValue (ParamIDs::kVoiceSoloIDs[v]);
+        }
         startTimerHz (20);
     }
 
@@ -177,53 +195,77 @@ public:
             g.drawText ((db > 0.0f ? "+" : "") + juce::String ((int) db) + " dB", 2, (int) yOf (db) - 7, (int) left - 6, 14, juce::Justification::centredRight);
         }
 
-        // modèle d'après les réglages actuels
-        bbdres::ResponseParams rp;
-        rp.semitones = tuneP->load() + fineP->load() * 0.01f;
-        rp.feedback = fbP->load();
-        rp.inputLpHz = inP->load();
-        rp.loopLpHz = loopP->load();
-        rp.bbd = bbdP->load();
-        rp.lowCutHz = lowP->load();
-        rp.lowCutAmt = pultecP->load();
+        // une courbe par voix audible (R1 en ambre, les autres dans leur couleur), d'après les réglages actuels
         const double sr = proc.getSampleRate();
-        rp.fs = sr > 8000.0 ? (float) sr : 48000.0f;
-        bbdres::ResponseModel model;
-        model.set (rp);
+        const float fs = sr > 8000.0 ? (float) sr : 48000.0f;
+        const bool quant = quantP->load() > 0.5f;
+        const int root = juce::jlimit (0, 11, juce::roundToInt (rootP->load()));
+        const unsigned mask = bbdres::kScales[juce::jlimit (0, bbdres::kNumScales - 1, juce::roundToInt (scaleP->load()))].mask;
+        bool anySolo = false;
+        for (int v = 0; v < bbdres::kNumVoices; ++v) anySolo = anySolo || voiceSoloP[v]->load() > 0.5f;
 
-        juce::Path curve;
-        const int n = juce::jmax (2, (int) pw);
-        for (int i = 0; i < n; ++i)
+        for (int v = bbdres::kNumVoices - 1; v >= 0; --v)   // R1 en dernier : dessinée par-dessus
         {
-            const float f = fMin * std::pow (fMax / fMin, (float) i / (float) (n - 1));
-            const float db = juce::jlimit (dbMin, dbMax, model.db (f));
-            if (i == 0) curve.startNewSubPath (left, yOf (db));
-            else        curve.lineTo (left + (float) i * pw / (float) (n - 1), yOf (db));
-        }
-        juce::Path fill (curve);
-        fill.lineTo (left + pw, yOf (dbMin));
-        fill.lineTo (left, yOf (dbMin));
-        fill.closeSubPath();
-        g.setColour (kAmber.withAlpha (0.10f));
-        g.fillPath (fill);
-        g.setColour (kAmber);
-        g.strokePath (curve, juce::PathStrokeType (1.6f));
+            if (! bbdres::voiceAudible (voiceOnP[v]->load() > 0.5f, voiceSoloP[v]->load() > 0.5f, anySolo)) continue;
+            bbdres::ResponseParams rp;
+            rp.semitones = bbdres::voicePitch (tuneP->load(), voiceIntP[v]->load(), fineP->load() * 0.01f, quant, root, mask);
+            rp.feedback = fbP->load();
+            rp.inputLpHz = inP->load();
+            rp.loopLpHz = loopP->load();
+            rp.bbd = bbdP->load();
+            rp.lowCutHz = lowP->load();
+            rp.lowCutAmt = pultecP->load();
+            rp.fs = fs;
+            bbdres::ResponseModel model;
+            model.set (rp);
 
-        // note fondamentale
-        const float f0 = model.fundamentalHz();
-        if (f0 > fMin && f0 < fMax)
-        {
-            g.setColour (kAmber.withAlpha (0.6f));
-            g.drawLine (xOf (f0), top, xOf (f0), top + ph, 1.0f);
+            juce::Path curve;
+            const int n = juce::jmax (2, (int) pw);
+            for (int i = 0; i < n; ++i)
+            {
+                const float f = fMin * std::pow (fMax / fMin, (float) i / (float) (n - 1));
+                const float db = juce::jlimit (dbMin, dbMax, model.db (f));
+                if (i == 0) curve.startNewSubPath (left, yOf (db));
+                else        curve.lineTo (left + (float) i * pw / (float) (n - 1), yOf (db));
+            }
+            const auto colour = kVoiceColours[v];
+            if (v == 0)
+            {
+                juce::Path fill (curve);
+                fill.lineTo (left + pw, yOf (dbMin));
+                fill.lineTo (left, yOf (dbMin));
+                fill.closeSubPath();
+                g.setColour (colour.withAlpha (0.10f));
+                g.fillPath (fill);
+            }
+            g.setColour (colour.withAlpha (v == 0 ? 1.0f : 0.75f));
+            g.strokePath (curve, juce::PathStrokeType (v == 0 ? 1.6f : 1.2f));
+
+            // note fondamentale de la voix
+            const float f0 = model.fundamentalHz();
+            if (f0 > fMin && f0 < fMax)
+            {
+                g.setColour (colour.withAlpha (0.55f));
+                g.drawLine (xOf (f0), top, xOf (f0), top + ph, 1.0f);
+            }
         }
     }
 
 private:
+    float voiceStamp() const
+    {
+        float h = 0.0f;
+        for (int v = 0; v < bbdres::kNumVoices; ++v)
+            h += (float) (v + 1) * ((voiceOnP[v]->load() > 0.5f ? 11.0f : 0.0f) + (voiceSoloP[v]->load() > 0.5f ? 23.0f : 0.0f) + voiceIntP[v]->load() * 1.7f);
+        return h;
+    }
+
     void timerCallback() override
     {
         const float stamp = tuneP->load() * 1000.0f + fineP->load() * 3.0f + fbP->load() * 71.0f
                           + std::log2 (inP->load()) * 13.0f + std::log2 (loopP->load()) * 17.0f + bbdP->load() * 29.0f + lowP->load() * 0.7f + pultecP->load() * 37.0f
-                          + (float) proc.getSampleRate() * 0.001f;
+                          + (float) proc.getSampleRate() * 0.001f
+                          + (quantP->load() > 0.5f ? 5.0f : 0.0f) + rootP->load() * 3.1f + scaleP->load() * 7.3f + voiceStamp();
         if (std::abs (stamp - lastStamp) > 1.0e-4f) { lastStamp = stamp; repaint(); }
     }
 
@@ -236,6 +278,12 @@ private:
     std::atomic<float>* bbdP = nullptr;
     std::atomic<float>* lowP = nullptr;
     std::atomic<float>* pultecP = nullptr;
+    std::atomic<float>* quantP = nullptr;
+    std::atomic<float>* rootP = nullptr;
+    std::atomic<float>* scaleP = nullptr;
+    std::atomic<float>* voiceOnP[bbdres::kNumVoices] = {};
+    std::atomic<float>* voiceIntP[bbdres::kNumVoices] = {};
+    std::atomic<float>* voiceSoloP[bbdres::kNumVoices] = {};
     float lastStamp = -1.0e9f;
 };
 } // namespace bbdui
