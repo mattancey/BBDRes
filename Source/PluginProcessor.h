@@ -5,6 +5,7 @@
 #include "Dsp/Pitch.h"
 #include "Dsp/Modulation.h"
 #include "Dsp/Sequencer.h"
+#include "Dsp/Voices.h"
 #include "Presets.h"
 
 class BBDResAudioProcessor : public juce::AudioProcessor
@@ -40,6 +41,7 @@ public:
     std::unique_ptr<bbdpresets::PresetManager> presets;   // presets généraux et de séquence, A/B
     std::atomic<float> uiBpm { 120.0f };   // tempo de l'hôte, lu par l'interface (affichage de la division)
     std::atomic<int> uiSeqStep { -1 };     // pas en cours du séquenceur (-1 = arrêté), lu par l'interface
+    std::atomic<float> uiPitchVoice[bbdres::kNumVoices];   // hauteur de chaque voix (-1 = inactive), lue par l'interface
     std::atomic<float> uiPitch { 48.0f };  // hauteur réelle du résonateur (LFO, quantification), lue par l'interface
 
 private:
@@ -55,8 +57,12 @@ private:
         int seqLength, seqStep;
         float seqGlide, stepVal[16];
         bool stepOn[16];
+        bool voiceOn[bbdres::kNumVoices], voiceSolo[bbdres::kNumVoices];
+        float voiceInt[bbdres::kNumVoices], voiceLvl[bbdres::kNumVoices], voicePan[bbdres::kNumVoices];
     };
     Targets readTargets() const;
+    float voiceTargetGain (const Targets& t, int v) const;   // gain visé d'une voix : niveau, On, Solo
+    bool voiceWasActive[bbdres::kNumVoices] = {};
 
     static constexpr int kControlBlock = 16;  // les paramètres sont mis à jour tous les 16 échantillons
 
@@ -87,6 +93,11 @@ private:
     std::atomic<float>* seqGlideP = nullptr;
     std::atomic<float>* stepP[16] = {};
     std::atomic<float>* stepOnP[16] = {};
+    std::atomic<float>* voiceOnP[bbdres::kNumVoices] = {};
+    std::atomic<float>* voiceIntP[bbdres::kNumVoices] = {};
+    std::atomic<float>* voiceLvlP[bbdres::kNumVoices] = {};
+    std::atomic<float>* voicePanP[bbdres::kNumVoices] = {};
+    std::atomic<float>* voiceSoloP[bbdres::kNumVoices] = {};
     std::atomic<float>* lfoPhaseP = nullptr;
     std::atomic<float>* rootP = nullptr;
     std::atomic<float>* scaleP = nullptr;
@@ -104,10 +115,11 @@ private:
     double seqPosAcc = 0.0;      // position du séquenceur (en pas) quand le transport est à l'arrêt
     double syncPhaseAcc = 0.0;   // phase du LFO synchronisé quand le transport est à l'arrêt
 
-    bbdres::Resonator resonators[2];
-    bbdres::Smoother tuneSm, fbSm, inSm, loopSm, mixSm, levelSm, driveSm, bbdSm,
+    bbdres::Resonator resonators[bbdres::kNumVoices][2];   // 4 voix en parallèle, chacune en stéréo
+    bbdres::Smoother fbSm, inSm, loopSm, mixSm, levelSm, driveSm, bbdSm,
                      noiseSm, spreadSm, crossSm, holdHpSm, holdLpSm, lowCutSm, pultecSm;
-    bbdres::Lfo lfo, driftTuneLfo[2], driftFilterLfo[2];
+    bbdres::Smoother pitchSm[bbdres::kNumVoices], voiceGainSm[bbdres::kNumVoices], voicePanSm[bbdres::kNumVoices];
+    bbdres::Lfo lfo, driftTuneLfo[bbdres::kNumVoices][2], driftFilterLfo[bbdres::kNumVoices][2];
     bbdres::EnvFollower env;
     bbdres::NoiseGate noiseGate;
     float mixPrev = 0.5f, levelPrev = 1.0f;
