@@ -69,7 +69,22 @@ public:
         pultecKnob->setBounds (746, 130, 58, 88);
         add<Knob> (a, ParamIDs::bbd, "BBD").setBounds (812, 130, 58, 88);
         add<Knob> (a, ParamIDs::noise, "NOISE").setBounds (872, 130, 58, 88);
-        add<ResponseView> (a, proc).setBounds (310, 272, 630, 210);
+        add<ResponseView> (a, proc).setBounds (310, 272, 630, 150);
+
+        // --- Résonateurs multiples : 4 bandeaux (allumé, solo, intervalle, niveau, balance) ---
+        for (int v = 0; v < bbdres::kNumVoices; ++v)
+        {
+            const int x0 = 314 + v * 158;
+            auto& on = add<ToggleBox> (a, ParamIDs::kVoiceOnIDs[v], "R" + juce::String (v + 1));
+            on.setBounds (x0, 438, 46, 26);
+            on.button.setColour (juce::TextButton::buttonOnColourId, kVoiceColours[v]);
+            auto& solo = add<ToggleBox> (a, ParamIDs::kVoiceSoloIDs[v], "S");
+            solo.setBounds (x0 + 50, 438, 30, 26);
+            solo.button.setColour (juce::TextButton::buttonOnColourId, kText);
+            add<Knob> (a, ParamIDs::kVoiceIntIDs[v], "INT", 48).setBounds (x0, 470, 48, 88);
+            add<Knob> (a, ParamIDs::kVoiceLvlIDs[v], "LVL", 48).setBounds (x0 + 50, 470, 48, 88);
+            add<Knob> (a, ParamIDs::kVoicePanIDs[v], "PAN", 48).setBounds (x0 + 100, 470, 48, 88);
+        }
 
         // --- Mod ---
         add<ChoiceBox> (a, ParamIDs::lfoShape, "SHAPE").setBounds (976, 100, 92, 42);
@@ -100,11 +115,11 @@ public:
         add<PresetBar> (*proc.presets, bbdpresets::Kind::Sequence, false).setBounds (30, 762, 410, 28);
         add<ToggleBox> (a, ParamIDs::seqOn, "SEQ").setBounds (30, 806, 80, 44);
         add<Knob> (a, ParamIDs::seqLength, "STEPS").setBounds (124, 794, 64, 88);
-        add<ChoiceBox> (a, ParamIDs::seqStep, "STEP").setBounds (200, 806, 100, 42);
-        add<ToggleBox> (a, ParamIDs::seqQuant, "Q SCALE").setBounds (310, 810, 64, 32);
-        add<SeqSlotButtons> (*proc.presets).setBounds (386, 806, 84, 64);
-        add<Knob> (a, ParamIDs::seqGlide, "GLIDE").setBounds (484, 794, 64, 88);
-        add<StepGrid> (a, proc).setBounds (558, 752, 698, 130);
+        add<ChoiceBox> (a, ParamIDs::seqStep, "STEP").setBounds (200, 796, 100, 42);
+        add<ToggleBox> (a, ParamIDs::seqQuant, "Q SCALE").setBounds (308, 800, 56, 28);
+        add<SeqSlotButtons> (*proc.presets).setBounds (200, 850, 164, 28);
+        add<Knob> (a, ParamIDs::seqGlide, "GLIDE").setBounds (382, 794, 64, 88);
+        add<StepGrid> (a, proc).setBounds (456, 752, 800, 130);
 
         // --- Presets généraux et A/B ---
         add<PresetBar> (*proc.presets, bbdpresets::Kind::General, true).setBounds (250, 22, 760, 32);
@@ -165,18 +180,21 @@ public:
         // Légende des mémoires de séquence (clic court = rappel, clic long = mémorise)
         g.setColour (kMuted);
         g.setFont (font (9.0f));
-        g.drawText ("MEMORY", 386, 790, 84, 12, juce::Justification::centred);
+        g.drawText ("MEMORY", 200, 838, 164, 11, juce::Justification::centred);
 
         // Zones réservées pour les fonctions à venir
         dashedBox (g, { 16.0f, 384.0f, 270.0f, 212.0f }, u8 ("RÉSERVÉ - NOUVELLES FONCTIONS"));
         dashedBox (g, { 964.0f, 400.0f, 300.0f, 196.0f }, u8 ("RÉSERVÉ"));
 
-        // Résonateurs (le deuxième est pour plus tard)
-        g.setColour (kAmber);
-        g.drawRoundedRectangle (310.5f, 496.5f, 55.0f, 27.0f, 3.0f, 1.0f);
-        g.setFont (font (11.0f, true));
-        g.drawText ("R1", 310, 496, 56, 28, juce::Justification::centred);
-        dashedBox (g, { 374.0f, 496.0f, 190.0f, 28.0f }, u8 ("+ RÉSONATEUR - v3"));
+        // Bandeaux des quatre résonateurs, chacun dans sa couleur (la même que sa courbe)
+        for (int v = 0; v < bbdres::kNumVoices; ++v)
+        {
+            const float x0 = (float) (310 + v * 158);
+            g.setColour (kDark);
+            g.fillRoundedRectangle (x0, 430.0f, 154.0f, 134.0f, 5.0f);
+            g.setColour (kVoiceColours[v]);
+            g.fillRect (x0 + 4.0f, 430.0f, 146.0f, 2.0f);
+        }
 
         // Séparateurs dans le panneau Resonator : Loop LP et Loop Dyn forment un groupe
         g.setColour (kBorder);
