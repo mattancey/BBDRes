@@ -38,6 +38,15 @@ BBDResAudioProcessor::BBDResAudioProcessor()
         stepP[i]   = apvts.getRawParameterValue (ParamIDs::kStepIDs[i]);
         stepOnP[i] = apvts.getRawParameterValue (ParamIDs::kStepOnIDs[i]);
     }
+    for (int v = 0; v < bbdres::kNumVoices; ++v)
+    {
+        voiceOnP[v]   = apvts.getRawParameterValue (ParamIDs::kVoiceOnIDs[v]);
+        voiceIntP[v]  = apvts.getRawParameterValue (ParamIDs::kVoiceIntIDs[v]);
+        voiceLvlP[v]  = apvts.getRawParameterValue (ParamIDs::kVoiceLvlIDs[v]);
+        voicePanP[v]  = apvts.getRawParameterValue (ParamIDs::kVoicePanIDs[v]);
+        voiceSoloP[v] = apvts.getRawParameterValue (ParamIDs::kVoiceSoloIDs[v]);
+        uiPitchVoice[v].store (-1.0f);
+    }
     presets = std::make_unique<bbdpresets::PresetManager> (apvts);
     lfoPhaseP  = apvts.getRawParameterValue (ParamIDs::lfoPhase);
     rootP      = apvts.getRawParameterValue (ParamIDs::root);
@@ -217,6 +226,38 @@ juce::AudioProcessorValueTreeState::ParameterLayout BBDResAudioProcessor::create
         juce::ParameterID { ParamIDs::cross, 1 }, "Cross",
         Range (0.0f, 1.0f, 0.001f), 0.0f, Attr().withStringFromValueFunction (percent)));
 
+    // --- Résonateurs : 4 voix en parallèle (allumée, intervalle par rapport à Tune, niveau, balance, solo) ---
+    static const float defaultInterval[4] = { 0.0f, 7.0f, 12.0f, -12.0f };
+    static const float defaultLevel[4] = { 0.0f, -3.0f, -4.0f, -4.0f };
+    static const float defaultPan[4] = { 0.0f, -0.35f, 0.35f, 0.0f };
+    auto interval = [] (float v, int)
+    {
+        const int n = juce::roundToInt (v);
+        return (n > 0 ? juce::String ("+") : juce::String()) + juce::String (n) + " st";
+    };
+    auto panText = [] (float v, int)
+    {
+        if (std::abs (v) < 0.005f) return juce::String ("C");
+        return juce::String (juce::roundToInt (std::abs (v) * 100.0f)) + (v < 0.0f ? " L" : " R");
+    };
+    for (int v = 0; v < bbdres::kNumVoices; ++v)
+    {
+        const juce::String n = "R" + juce::String (v + 1);
+        layout.add (std::make_unique<juce::AudioParameterBool> (
+            juce::ParameterID { ParamIDs::kVoiceOnIDs[v], 1 }, n + " On", v == 0));
+        layout.add (std::make_unique<juce::AudioParameterFloat> (
+            juce::ParameterID { ParamIDs::kVoiceIntIDs[v], 1 }, n + " Interval",
+            Range (-24.0f, 24.0f, 1.0f), defaultInterval[v], Attr().withStringFromValueFunction (interval)));
+        layout.add (std::make_unique<juce::AudioParameterFloat> (
+            juce::ParameterID { ParamIDs::kVoiceLvlIDs[v], 1 }, n + " Level",
+            Range (-36.0f, 6.0f, 0.1f), defaultLevel[v], Attr().withLabel ("dB")));
+        layout.add (std::make_unique<juce::AudioParameterFloat> (
+            juce::ParameterID { ParamIDs::kVoicePanIDs[v], 1 }, n + " Pan",
+            Range (-1.0f, 1.0f, 0.01f), defaultPan[v], Attr().withStringFromValueFunction (panText)));
+        layout.add (std::make_unique<juce::AudioParameterBool> (
+            juce::ParameterID { ParamIDs::kVoiceSoloIDs[v], 1 }, n + " Solo", false));
+    }
+
     // --- Séquenceur de pitch ---
     layout.add (std::make_unique<juce::AudioParameterBool> (
         juce::ParameterID { ParamIDs::seqOn, 1 }, "Seq On", false));
@@ -300,6 +341,14 @@ BBDResAudioProcessor::Targets BBDResAudioProcessor::readTargets() const
         t.stepVal[i] = stepP[i]->load();
         t.stepOn[i]  = stepOnP[i]->load() > 0.5f;
     }
+    for (int v = 0; v < bbdres::kNumVoices; ++v)
+    {
+        t.voiceOn[v]   = voiceOnP[v]->load() > 0.5f;
+        t.voiceSolo[v] = voiceSoloP[v]->load() > 0.5f;
+        t.voiceInt[v]  = voiceIntP[v]->load();
+        t.voiceLvl[v]  = voiceLvlP[v]->load();
+        t.voicePan[v]  = voicePanP[v]->load();
+    }
     t.lfoDepth  = lfoDepthP->load();
     t.loopDyn   = loopDynP->load();
     t.drift     = driftP->load();
@@ -316,6 +365,15 @@ BBDResAudioProcessor::Targets BBDResAudioProcessor::readTargets() const
     return t;
 }
 
+float BBDResAudioProcessor::voiceTargetGain (const Targets& t, int v) const
+{
+    bool anySolo = false;
+    for (int i = 0; i < bbdres::kNumVoices; ++i)
+        anySolo = anySolo || t.voiceSolo[i];
+    const bool audible = bbdres::voiceAudible (t.voiceOn[v], t.voiceSolo[v], anySolo);
+    return audible ? juce::Decibels::decibelsToGain (t.voiceLvl[v], -60.0f) : 0.0f;
+}
+
 void BBDResAudioProcessor::prepareToPlay (double sampleRate, int)
 {
     currentSampleRate = sampleRate;
@@ -324,10 +382,16 @@ void BBDResAudioProcessor::prepareToPlay (double sampleRate, int)
     const float fs = (float) sampleRate;
     const float controlRate = fs / (float) kControlBlock;
 
-    for (int i = 0; i < 2; ++i)
-        resonators[i].prepare (fs, (std::uint32_t) (i + 1));
+    for (int v = 0; v < bbdres::kNumVoices; ++v)
+        for (int c = 0; c < 2; ++c)
+            resonators[v][c].prepare (fs, (std::uint32_t) (v * 2 + c + 1));
 
-    tuneSm.prepare (controlRate, 0.03f);   // glissando de Tune d'environ 30 ms
+    for (int v = 0; v < bbdres::kNumVoices; ++v)
+    {
+        pitchSm[v].prepare (controlRate, 0.03f);   // glissando de la hauteur d'environ 30 ms
+        voiceGainSm[v].prepare (controlRate, 0.02f);
+        voicePanSm[v].prepare (controlRate, 0.02f);
+    }
     fbSm.prepare (controlRate, 0.02f);
     inSm.prepare (controlRate, 0.02f);
     loopSm.prepare (controlRate, 0.02f);
@@ -344,16 +408,27 @@ void BBDResAudioProcessor::prepareToPlay (double sampleRate, int)
     holdLpSm.prepare (controlRate, 0.02f);
 
     lfo.prepare (controlRate, 11u);
-    // Dérives indépendantes à gauche et à droite (rythmes différents pour ne pas rester synchrones)
-    driftTuneLfo[0].prepare (controlRate, 23u);   driftTuneLfo[0].setRateHz (0.60f);
-    driftTuneLfo[1].prepare (controlRate, 29u);   driftTuneLfo[1].setRateHz (0.77f);
-    driftFilterLfo[0].prepare (controlRate, 37u); driftFilterLfo[0].setRateHz (0.51f);
-    driftFilterLfo[1].prepare (controlRate, 41u); driftFilterLfo[1].setRateHz (0.61f);
+    // Dérives indépendantes pour chaque voix et chaque canal (rythmes et graines différents : l'ensemble ne reste pas synchrone)
+    for (int v = 0; v < bbdres::kNumVoices; ++v)
+        for (int c = 0; c < 2; ++c)
+        {
+            const int n = v * 2 + c;
+            driftTuneLfo[v][c].prepare (controlRate, (std::uint32_t) (101 + 13 * n));
+            driftTuneLfo[v][c].setRateHz (0.60f + 0.17f * (float) c + 0.05f * (float) v);
+            driftFilterLfo[v][c].prepare (controlRate, (std::uint32_t) (211 + 17 * n));
+            driftFilterLfo[v][c].setRateHz (0.51f + 0.10f * (float) c + 0.04f * (float) v);
+        }
     env.prepare (controlRate);
     noiseGate.prepare (controlRate);
 
     const auto t = readTargets();
-    tuneSm.snap (t.tune + t.fine * 0.01f);
+    for (int v = 0; v < bbdres::kNumVoices; ++v)
+    {
+        pitchSm[v].snap (t.tune + t.voiceInt[v] + t.fine * 0.01f);
+        voiceGainSm[v].snap (voiceTargetGain (t, v));
+        voicePanSm[v].snap (t.voicePan[v]);
+        voiceWasActive[v] = false;
+    }
     fbSm.snap (t.feedback);
     inSm.snap (t.inLog2);
     loopSm.snap (t.loopLog2);
@@ -468,12 +543,6 @@ void BBDResAudioProcessor::processBlock (juce::AudioBuffer<float>& buffer, juce:
         else                       lfoOct   = lfoV * 3.0f;    // +/- 3 octaves de filtre
 
         const float dynOct = t.loopDyn * envUnit * 3.0f;      // Loop Dyn : l'entrée pilote le filtre de boucle
-        float driftSemis[2], driftOct[2];                      // dérive indépendante par canal
-        for (int c = 0; c < 2; ++c)
-        {
-            driftSemis[c] = driftTuneLfo[c].next (5) * t.drift * 1.0f;    // jusqu'à +/- 100 cents
-            driftOct[c]   = driftFilterLfo[c].next (5) * t.drift * 0.5f;  // jusqu'à +/- 0,5 octave
-        }
 
         // --- Séquenceur de pitch : décalage de chaque pas par rapport à Tune, calé ou non sur la gamme générale ---
         float seqBase = t.tune;
@@ -502,18 +571,14 @@ void BBDResAudioProcessor::processBlock (juce::AudioBuffer<float>& buffer, juce:
         }
         uiSeqStep.store (seqIndex);
 
-        // --- Hauteur : séquenceur et LFO, puis quantification générale, puis accord fin ---
-        float base = seqBase + lfoSemis;
-        if (t.quantize)
-            base = bbdres::quantizeToScale (base, t.root, bbdres::kScales[t.scale].mask);
-        const float semisTarget = base + t.fine * 0.01f;
+        // --- Hauteur commune : séquenceur et LFO (chaque voix y ajoute son intervalle) ---
+        const float baseRaw = seqBase + lfoSemis;
+        const unsigned scaleMask = bbdres::kScales[t.scale].mask;
 
         const float fbTarget = juce::jlimit (0.0f, 1.0f, t.feedback + lfoFb);
         const float loopTarget = juce::jlimit (kMinLoopLog2, kMaxLoopLog2, t.loopLog2 + lfoOct + dynOct);
 
-        // --- Lissage ---
-        const float semisSm = tuneSm.next (juce::jlimit (18.0f, 114.0f, semisTarget));
-        uiPitch.store (semisSm);                       // pour le clavier de l'interface
+        // --- Lissage des réglages communs ---
         const float loopSmV = loopSm.next (loopTarget);
         const float spreadSemis = spreadSm.next (t.spread) * 1.0f;   // désaccord total : jusqu'à 100 cents (+/- 50 par canal)
         const float spreadHalf = numCh > 1 ? spreadSemis * 0.5f : 0.0f;
@@ -536,15 +601,46 @@ void BBDResAudioProcessor::processBlock (juce::AudioBuffer<float>& buffer, juce:
         const float mixNew = mixSm.next (t.mix);
         const float lvlNew = levelSm.next (t.level);
 
-        for (int c = 0; c < numCh; ++c)
+        // --- Voix : hauteur (intervalle, gamme), niveau, balance, solo. Une voix muette ne consomme rien. ---
+        float voiceGainL[bbdres::kNumVoices], voiceGainR[bbdres::kNumVoices];
+        bool voiceActive[bbdres::kNumVoices];
+        for (int v = 0; v < bbdres::kNumVoices; ++v)
         {
-            bbdres::ResonatorParams rc = rp;
-            rc.holdSeconds    = holdSec;
-            rc.holdMix        = t.holdMix;
-            rc.holdSpeedSemis = driftSemis[c] * 0.25f;   // la mémoire dérive un peu, comme une bande qui vit
-            rc.semitones = juce::jlimit (12.0f, 120.0f, semisSm + (c == 0 ? -spreadHalf : spreadHalf) + driftSemis[c]);
-            rc.loopLpHz  = std::exp2 (juce::jlimit (kMinLoopLog2, kMaxLoopLog2, loopSmV + driftOct[c]));
-            resonators[c].update (rc);
+            const float gainTarget = voiceTargetGain (t, v);
+            const float g = voiceGainSm[v].next (gainTarget);
+            const auto pan = bbdres::panGains (voicePanSm[v].next (t.voicePan[v]));
+            voiceGainL[v] = g * (numCh > 1 ? pan.l : 1.0f);
+            voiceGainR[v] = g * pan.r;
+            voiceActive[v] = g > 1.0e-4f || gainTarget > 0.0f;
+
+            const float target = juce::jlimit (18.0f, 114.0f, bbdres::voicePitch (baseRaw, t.voiceInt[v], t.fine * 0.01f, t.quantize, t.root, scaleMask));
+            const float voiceSemis = pitchSm[v].next (target);
+            uiPitchVoice[v].store (voiceActive[v] ? voiceSemis : -1.0f);   // pour le clavier de l'interface
+            if (v == 0) uiPitch.store (voiceSemis);
+
+            if (! voiceActive[v]) { voiceWasActive[v] = false; continue; }
+            if (! voiceWasActive[v])   // la voix (re)démarre : on repart d'une ligne à retard vide
+            {
+                for (int c = 0; c < 2; ++c) resonators[v][c].reset();
+                voiceWasActive[v] = true;
+            }
+
+            float driftSemis[2], driftOct[2];   // dérive propre à chaque voix et à chaque canal
+            for (int c = 0; c < 2; ++c)
+            {
+                driftSemis[c] = driftTuneLfo[v][c].next (5) * t.drift * 1.0f;    // jusqu'à +/- 100 cents
+                driftOct[c]   = driftFilterLfo[v][c].next (5) * t.drift * 0.5f;  // jusqu'à +/- 0,5 octave
+            }
+            for (int c = 0; c < numCh; ++c)
+            {
+                bbdres::ResonatorParams rc = rp;
+                rc.holdSeconds    = holdSec;
+                rc.holdMix        = t.holdMix;
+                rc.holdSpeedSemis = driftSemis[c] * 0.25f;   // la mémoire dérive un peu, comme une bande qui vit
+                rc.semitones = juce::jlimit (12.0f, 120.0f, voiceSemis + (c == 0 ? -spreadHalf : spreadHalf) + driftSemis[c]);
+                rc.loopLpHz  = std::exp2 (juce::jlimit (kMinLoopLog2, kMaxLoopLog2, loopSmV + driftOct[c]));
+                resonators[v][c].update (rc);
+            }
         }
 
         for (int i = 0; i < len; ++i)
@@ -553,15 +649,21 @@ void BBDResAudioProcessor::processBlock (juce::AudioBuffer<float>& buffer, juce:
             const float m = mixPrev + (mixNew - mixPrev) * k;
             const float l = levelPrev + (lvlNew - levelPrev) * k;
 
-            // Sorties de boucle de l'échantillon précédent, pour le couplage entre canaux
-            const float crossIn[2] = { resonators[1].loopOut(), resonators[0].loopOut() };
-
+            // Somme des voix : chacune reçoit le même signal d'entrée
+            float wetSum[2] = { 0.0f, 0.0f };
+            for (int v = 0; v < bbdres::kNumVoices; ++v)
+            {
+                if (! voiceActive[v]) continue;
+                // sorties de boucle de l'échantillon précédent, pour le couplage entre les deux canaux de la voix
+                const float crossIn[2] = { resonators[v][1].loopOut(), resonators[v][0].loopOut() };
+                for (int c = 0; c < numCh; ++c)
+                    wetSum[c] += (c == 0 ? voiceGainL[v] : voiceGainR[v]) * resonators[v][c].process (data[c][start + i], crossIn[c]);
+            }
             for (int c = 0; c < numCh; ++c)
             {
                 float& s = data[c][start + i];
                 const float dry = s;
-                const float wet = resonators[c].process (dry, crossIn[c]);
-                s = (dry + (wet - dry) * m) * l;
+                s = (dry + (wetSum[c] - dry) * m) * l;
             }
         }
         mixPrev = mixNew;
