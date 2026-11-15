@@ -4,6 +4,7 @@
 #include "../Source/Dsp/Modulation.h"
 #include "../Source/Dsp/Response.h"
 #include "../Source/Dsp/Sequencer.h"
+#include "../Source/Dsp/Voices.h"
 #include "../Source/FactoryPresets.h"
 #include <map>
 #include <cstdio>
@@ -571,6 +572,14 @@ static void testFactoryPresets()
                 float lo = 0, hi = 0; bool known = false;
                 if (id.rfind ("stepOn", 0) == 0) { lo = 0; hi = 1; known = true; }
                 else if (id.rfind ("step", 0) == 0) { lo = -24; hi = 24; known = true; }
+                else if (id.size() >= 4 && id[0] == 'r' && id[1] >= '1' && id[1] <= '4')
+                {
+                    const std::string suffix = id.substr (2);
+                    if (suffix == "On" || suffix == "Solo") { lo = 0; hi = 1; known = true; }
+                    else if (suffix == "Int") { lo = -24; hi = 24; known = true; }
+                    else if (suffix == "Lvl") { lo = -36; hi = 6; known = true; }
+                    else if (suffix == "Pan") { lo = -1; hi = 1; known = true; }
+                }
                 else { const auto it = range.find (id); if (it != range.end()) { lo = it->second.first; hi = it->second.second; known = true; } }
                 check (known, "preset : identifiant de reglage inconnu");
                 check (pv.value >= lo && pv.value <= hi, "preset : valeur hors plage");
@@ -609,6 +618,39 @@ static void testNoiseGate()
     };
     check (noiseRms (0.0f) == 0.0f && noiseRms (1.0f) > 0.0f, "gate : le souffle ne suit pas la porte");
     std::printf ("porte du souffle : attaque 0,2 s, release 0,5 s, seuil -40 dB verifies\n");
+}
+
+// Résonateurs multiples : balance, solo, hauteur des voix dans la gamme
+static void testVoices()
+{
+    auto p0 = bbdres::panGains (0.0f), pl = bbdres::panGains (-1.0f), pr = bbdres::panGains (1.0f), ph = bbdres::panGains (0.5f);
+    check (p0.l == 1.0f && p0.r == 1.0f, "balance : le centre ne doit rien attenuer");
+    check (pl.l == 1.0f && pl.r == 0.0f, "balance : tout a gauche");
+    check (pr.l == 0.0f && pr.r == 1.0f, "balance : tout a droite");
+    check (std::fabs (ph.l - 0.5f) < 1.0e-6f && ph.r == 1.0f, "balance : demi-droite");
+
+    // solo : sans solo, l'interrupteur On décide ; avec un solo, seuls les voix en solo s'entendent
+    check (bbdres::voiceAudible (true, false, false) && ! bbdres::voiceAudible (false, false, false), "solo : sans solo");
+    check (! bbdres::voiceAudible (true, false, true), "solo : une voix allumee mais pas en solo doit se taire");
+    check (bbdres::voiceAudible (false, true, true), "solo : une voix eteinte en solo doit s'entendre");
+
+    // hauteur : avec Quantize, toutes les voix restent dans la gamme, quels que soient les intervalles
+    bool allInScale = true;
+    for (int sc = 0; sc < bbdres::kNumScales; ++sc)
+        for (int root = 0; root < 12; ++root)
+            for (int base = 36; base < 84; ++base)
+                for (int interval = -24; interval <= 24; ++interval)
+                {
+                    const float p = bbdres::voicePitch ((float) base, (float) interval, 0.0f, true, root, bbdres::kScales[sc].mask);
+                    const int degree = ((((int) std::lround (p) - root) % 12) + 12) % 12;
+                    if (! ((bbdres::kScales[sc].mask >> degree) & 1u)) allInScale = false;
+                }
+    check (allInScale, "voix : une note de l'accord sort de la gamme avec Quantize");
+    check (bbdres::voicePitch (60.0f, 7.0f, 0.0f, true, 0, bbdres::kScales[1].mask) == 67.0f, "voix : quinte en do majeur");
+    check (bbdres::voicePitch (60.0f, 4.0f, 0.5f, true, 0, bbdres::kScales[1].mask) == 64.5f, "voix : tierce majeure et accord fin");
+    check (bbdres::voicePitch (60.0f, 1.0f, 0.0f, false, 0, bbdres::kScales[1].mask) == 61.0f, "voix : sans Quantize, l'intervalle est chromatique");
+    check (bbdres::voicePitch (60.0f, 0.0f, 0.25f, true, 0, bbdres::kScales[0].mask) == 60.25f, "voix : intervalle nul = comportement d'une seule voix");
+    std::printf ("voix : balance, solo et gamme verifies (%d voix)\n", bbdres::kNumVoices);
 }
 
 // Pas de clic quand le BBD quitte zéro (le filtre ne doit pas s'enclencher d'un coup)
@@ -793,6 +835,7 @@ int main()
     testSequencer();
     testFactoryPresets();
     testNoiseGate();
+    testVoices();
     testNoiseAndBbd();
     testBbdClick();
     for (float cr : { 0.25f, 0.5f, 1.0f })
