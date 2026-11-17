@@ -5,6 +5,7 @@
 #include "UI/StepGrid.h"
 #include "UI/PresetBar.h"
 #include "UI/SeqSlots.h"
+#include "UI/CqtView.h"
 
 namespace
 {
@@ -57,6 +58,9 @@ public:
         add<ChoiceBox> (a, ParamIDs::scale, "SCALE").setBounds (104, 232, 100, 42);
         add<ToggleBox> (a, ParamIDs::quantize, "QUANT").setBounds (212, 232, 62, 28);
         add<KeyboardView> (a, proc).setBounds (28, 284, 246, 60);
+
+        // --- Analyseur CQT de la sortie wet ---
+        add<CqtView> (proc).setBounds (22, 404, 258, 186);
 
         // --- Resonator ---
         add<Knob> (a, ParamIDs::tune, "TUNE").setBounds (310, 104, 116, 150);
@@ -170,6 +174,7 @@ public:
         // Panneaux
         panel (g, { 16, 72, 270, 118 }, "INPUT");
         panel (g, { 16, 202, 270, 170 }, "PITCH");
+        panel (g, { 16, 384, 270, 212 }, "ANALYSEUR CQT - SORTIE WET");
         panel (g, { 298, 72, 654, 524 }, "RESONATOR");
         panel (g, { 964, 72, 300, 186 }, "MOD");
         panel (g, { 964, 270, 300, 118 }, "STEREO");
@@ -183,7 +188,6 @@ public:
         g.drawText ("MEMORY", 200, 838, 164, 11, juce::Justification::centred);
 
         // Zones réservées pour les fonctions à venir
-        dashedBox (g, { 16.0f, 384.0f, 270.0f, 212.0f }, u8 ("RÉSERVÉ - NOUVELLES FONCTIONS"));
         dashedBox (g, { 964.0f, 400.0f, 300.0f, 196.0f }, u8 ("RÉSERVÉ"));
 
         // Bandeaux des quatre résonateurs, chacun dans sa couleur (la même que sa courbe)
