@@ -47,6 +47,8 @@ BBDResAudioProcessor::BBDResAudioProcessor()
         voiceSoloP[v] = apvts.getRawParameterValue (ParamIDs::kVoiceSoloIDs[v]);
         uiPitchVoice[v].store (-1.0f);
     }
+    for (int i = 0; i < kCqtRing; ++i)
+        cqtRing[i].store (0.0f, std::memory_order_relaxed);
     presets = std::make_unique<bbdpresets::PresetManager> (apvts);
     lfoPhaseP  = apvts.getRawParameterValue (ParamIDs::lfoPhase);
     rootP      = apvts.getRawParameterValue (ParamIDs::root);
@@ -501,6 +503,9 @@ void BBDResAudioProcessor::processBlock (juce::AudioBuffer<float>& buffer, juce:
     constexpr float kMinLoopLog2 = 6.64385619f;   // log2 (100 Hz)
     constexpr float kMaxLoopLog2 = 14.2877124f;   // log2 (20000 Hz)
 
+    unsigned cqtWrite = cqtPos.load (std::memory_order_relaxed);
+    const bool cqtActive = cqtOn.load (std::memory_order_relaxed);
+
     for (int start = 0; start < numSamples; start += kControlBlock)
     {
         const int len = juce::jmin (kControlBlock, numSamples - start);
@@ -659,6 +664,11 @@ void BBDResAudioProcessor::processBlock (juce::AudioBuffer<float>& buffer, juce:
                 for (int c = 0; c < numCh; ++c)
                     wetSum[c] += (c == 0 ? voiceGainL[v] : voiceGainR[v]) * resonators[v][c].process (data[c][start + i], crossIn[c]);
             }
+            if (cqtActive)   // analyseur : la sortie wet, avant le mélange avec le signal sec
+            {
+                cqtRing[cqtWrite & (unsigned) (kCqtRing - 1)].store (numCh > 1 ? 0.5f * (wetSum[0] + wetSum[1]) : wetSum[0], std::memory_order_relaxed);
+                ++cqtWrite;
+            }
             for (int c = 0; c < numCh; ++c)
             {
                 float& s = data[c][start + i];
@@ -669,6 +679,7 @@ void BBDResAudioProcessor::processBlock (juce::AudioBuffer<float>& buffer, juce:
         mixPrev = mixNew;
         levelPrev = lvlNew;
     }
+    cqtPos.store (cqtWrite, std::memory_order_release);
 }
 
 juce::AudioProcessorEditor* BBDResAudioProcessor::createEditor()
