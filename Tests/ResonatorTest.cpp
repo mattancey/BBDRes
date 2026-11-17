@@ -5,6 +5,8 @@
 #include "../Source/Dsp/Response.h"
 #include "../Source/Dsp/Sequencer.h"
 #include "../Source/Dsp/Voices.h"
+#include "../Source/Dsp/Cqt.h"
+#include <chrono>
 #include "../Source/FactoryPresets.h"
 #include <map>
 #include <cstdio>
@@ -653,6 +655,62 @@ static void testVoices()
     std::printf ("voix : balance, solo et gamme verifies (%d voix)\n", bbdres::kNumVoices);
 }
 
+// Analyseur CQT : justesse des pics, calibrage en dB, silence, couleurs, coût
+static void testCqt()
+{
+    const float fs = 48000.0f;
+    bbdres::Cqt cqt; cqt.prepare (fs);
+    const int n = cqt.maxLength();
+    std::vector<float> x ((size_t) n), db ((size_t) bbdres::Cqt::kNumBins);
+    auto peakOf = [&] (std::initializer_list<std::pair<float, float>> tones, int& bin, float& peakDb)
+    {
+        for (int i = 0; i < n; ++i)
+        {
+            double s = 0.0;
+            for (const auto& tn : tones) s += (double) tn.second * std::sin (2.0 * 3.14159265358979 * (double) tn.first * (double) i / (double) fs);
+            x[(size_t) i] = (float) s;
+        }
+        cqt.analyze (x.data(), n, db.data());
+        bin = (int) (std::max_element (db.begin(), db.end()) - db.begin());
+        peakDb = db[(size_t) bin];
+    };
+    auto expectedBin = [] (float hz) { return (float) bbdres::Cqt::kBinsPerOctave * std::log2 (hz / bbdres::Cqt::kMinHz); };
+
+    int bin = 0; float pk = 0.0f;
+    for (float hz : { 65.41f, 110.0f, 261.63f, 440.0f, 1760.0f, 5000.0f })
+    {
+        peakOf ({ { hz, 0.5f } }, bin, pk);
+        const float err = std::fabs ((float) bin - expectedBin (hz));
+        std::printf ("cqt : %.1f Hz -> bin %d (attendu %.1f), %.1f dB\n", hz, bin, expectedBin (hz), pk);
+        check (err <= 0.8f, "cqt : le pic n'est pas sur le bon bin");
+        check (std::fabs (pk - 20.0f * std::log10 (0.5f)) < 1.5f, "cqt : amplitude mal calibree (attendu -6 dB)");
+    }
+    // deux notes : do2 et sol2 donnent deux pics distincts
+    peakOf ({ { 65.41f, 0.4f }, { 98.0f, 0.4f } }, bin, pk);
+    const int b1 = (int) std::lround (expectedBin (65.41f)), b2 = (int) std::lround (expectedBin (98.0f));
+    check (db[(size_t) b1] > -12.0f && db[(size_t) b2] > -12.0f && db[(size_t) ((b1 + b2) / 2)] < -20.0f, "cqt : deux notes non separees");
+    // silence
+    std::fill (x.begin(), x.end(), 0.0f);
+    cqt.analyze (x.data(), n, db.data());
+    check (*std::max_element (db.begin(), db.end()) <= -119.0f, "cqt : le silence n'est pas du silence");
+
+    // couleurs : do rouge, teintes differentes pour les classes de hauteur, noir sous -85 dB, lumineux a 0 dB
+    const auto cC = bbdres::cqtColour (0, -10.0f), cE = bbdres::cqtColour (8, -10.0f), cFs = bbdres::cqtColour (12, -10.0f), cQ = bbdres::cqtColour (0, -100.0f), cL = bbdres::cqtColour (0, 0.0f);
+    check (cC.r > cC.g && cC.r > cC.b, "couleur : do doit etre rouge");
+    check (cE.g > cE.r || cE.g > cE.b, "couleur : mi doit tirer vers le vert");
+    check (! (cC.r == cFs.r && cC.g == cFs.g && cC.b == cFs.b), "couleur : do et fa# identiques");
+    check (cQ.r == 0 && cQ.g == 0 && cQ.b == 0, "couleur : le silence doit etre noir");
+    check (cL.r > 200 && cL.g > 100, "couleur : un pic fort doit etre tres lumineux");
+    check (bbdres::cqtColour (0, 0.0f).r == bbdres::cqtColour (192, 0.0f).r, "couleur : la teinte doit boucler a chaque octave");
+
+    // coût d'une analyse (une par image affichée)
+    const auto t0 = std::chrono::steady_clock::now();
+    for (int i = 0; i < 20; ++i) cqt.analyze (x.data(), n, db.data());
+    const double ms = std::chrono::duration<double, std::milli> (std::chrono::steady_clock::now() - t0).count() / 20.0;
+    std::printf ("cqt : %d bins, fenetre max %d echantillons, %.2f ms par analyse\n", bbdres::Cqt::kNumBins, n, ms);
+    check (ms < 12.0, "cqt : analyse trop lente");
+}
+
 // Pas de clic quand le BBD quitte zéro (le filtre ne doit pas s'enclencher d'un coup)
 static void testBbdClick()
 {
@@ -836,6 +894,7 @@ int main()
     testFactoryPresets();
     testNoiseGate();
     testVoices();
+    testCqt();
     testNoiseAndBbd();
     testBbdClick();
     for (float cr : { 0.25f, 0.5f, 1.0f })
