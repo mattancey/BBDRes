@@ -42,6 +42,11 @@ public:
     std::atomic<float> uiBpm { 120.0f };   // tempo de l'hôte, lu par l'interface (affichage de la division)
     std::atomic<int> uiSeqStep { -1 };     // pas en cours du séquenceur (-1 = arrêté), lu par l'interface
     std::atomic<float> uiPitchVoice[bbdres::kNumVoices];   // hauteur de chaque voix (-1 = inactive), lue par l'interface
+    // Sortie wet pour l'analyseur CQT de l'interface : somme mono des voix, avant Mix. Écrite seulement si l'interface est ouverte.
+    static constexpr int kCqtRing = 131072;
+    std::atomic<float> cqtRing[kCqtRing];
+    std::atomic<unsigned> cqtPos { 0 };
+    std::atomic<bool> cqtOn { false };
     std::atomic<float> uiPitch { 48.0f };  // hauteur réelle du résonateur (LFO, quantification), lue par l'interface
 
 private:
