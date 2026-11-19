@@ -20,6 +20,8 @@ struct SeqStepDef
 };
 
 inline constexpr SeqStepDef kSeqSteps[] = {
+    { "1/32", 0.125f, 0.0f },
+    { "1/24", 1.0f / 6.0f, 0.0f },   // triolet de doubles croches
     { "1/16", 0.25f, 0.0f },
     { "1/8T", 1.0f / 3.0f, 0.0f },
     { "1/8", 0.5f, 0.0f },
@@ -48,6 +50,25 @@ struct SeqState
     float cur = 0.0f;    // hauteur du pas en cours
     float t = 1.0f;      // avancement du glissando, de 0 (précédent) à 1 (en cours)
     int index = 0;       // pas en cours
+};
+
+// Transition douce quand le CONTENU de la séquence change (rappel d'une mémoire ou d'un preset, activation) :
+// la hauteur glisse de l'ancienne valeur vers la nouvelle au lieu de sauter. Durée : environ 10 % d'un pas.
+struct SeqTransition
+{
+    float from = 0.0f, left = 0.0f, total = 0.0f;
+    void start (float fromValue, float seconds)
+    {
+        from = fromValue;
+        total = left = std::max (seconds, 1.0e-3f);
+    }
+    float apply (float target, float dt)
+    {
+        if (left <= 0.0f) return target;
+        left = std::max (0.0f, left - dt);
+        const float p = 1.0f - left / total;
+        return from + (target - from) * (p * p * (3.0f - 2.0f * p));
+    }
 };
 
 // posSteps : position en pas (négative ou très grande possible). glide : 0 = saut franc, 1 = glisse sur tout le pas.
