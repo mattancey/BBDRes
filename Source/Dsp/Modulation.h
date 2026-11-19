@@ -78,9 +78,9 @@ private:
 
 // Synchronisation au tempo : 0 = libre, sinon durée d'un cycle en temps (noires)
 inline constexpr const char* kSyncNames[] = { "Free", "4 bars", "2 bars", "1 bar", "1/2", "1/4",
-                                              "1/4.", "1/4T", "1/8", "1/8.", "1/8T", "1/16" };
+                                              "1/4.", "1/4T", "1/8", "1/8.", "1/8T", "1/16", "1/24", "1/32" };
 inline constexpr float kSyncBeats[] = { 0.0f, 16.0f, 8.0f, 4.0f, 2.0f, 1.0f,
-                                        1.5f, 2.0f / 3.0f, 0.5f, 0.75f, 1.0f / 3.0f, 0.25f };
+                                        1.5f, 2.0f / 3.0f, 0.5f, 0.75f, 1.0f / 3.0f, 0.25f, 1.0f / 6.0f, 0.125f };
 inline constexpr int kNumSync = (int) (sizeof (kSyncBeats) / sizeof (kSyncBeats[0]));
 
 // Longueur du looper : curseur 0..1 -> 30 ms à 4 s (échelle exponentielle)
