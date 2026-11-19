@@ -6,6 +6,7 @@
 #include "../Source/Dsp/Sequencer.h"
 #include "../Source/Dsp/Voices.h"
 #include "../Source/Dsp/Cqt.h"
+#include "../Source/Quotes.h"
 #include <chrono>
 #include "../Source/FactoryPresets.h"
 #include <map>
@@ -537,13 +538,15 @@ static void testSequencer()
     s = bbdres::sequencerState (1.0, 1, v, on, 1.0f);               // longueur 1 : aucun mouvement
     check (s.prev == s.cur, "sequenceur : longueur 1");
 
-    check (std::fabs (bbdres::seqStepBeats (5, 4.0) - 1.0) < 1.0e-9, "duree : 1/4 = 1 temps");
-    check (std::fabs (bbdres::seqStepBeats (2, 4.0) - 0.5) < 1.0e-9, "duree : 1/8 = 1/2 temps");
-    check (std::fabs (bbdres::seqStepBeats (9, 4.0) - 2.0) < 1.0e-9, "duree : 1/2 mesure en 4/4");
-    check (std::fabs (bbdres::seqStepBeats (9, 3.0) - 1.5) < 1.0e-9, "duree : 1/2 mesure en 3/4");
-    check (std::fabs (bbdres::seqStepBeats (12, 4.0) - 16.0) < 1.0e-9, "duree : 4 mesures en 4/4");
-    check (std::fabs (bbdres::seqStepBeats (12, 3.0) - 12.0) < 1.0e-9, "duree : 4 mesures en 3/4");
-    check (bbdres::kNumSeqSteps == 13, "nombre de durees de pas");
+    check (std::fabs (bbdres::seqStepBeats (7, 4.0) - 1.0) < 1.0e-9, "duree : 1/4 = 1 temps");
+    check (std::fabs (bbdres::seqStepBeats (4, 4.0) - 0.5) < 1.0e-9, "duree : 1/8 = 1/2 temps");
+    check (std::fabs (bbdres::seqStepBeats (0, 4.0) - 0.125) < 1.0e-9, "duree : 1/32 = 1/8 de temps");
+    check (std::fabs (bbdres::seqStepBeats (1, 4.0) - 1.0 / 6.0) < 1.0e-6, "duree : 1/24 = 1/6 de temps");
+    check (std::fabs (bbdres::seqStepBeats (11, 4.0) - 2.0) < 1.0e-9, "duree : 1/2 mesure en 4/4");
+    check (std::fabs (bbdres::seqStepBeats (11, 3.0) - 1.5) < 1.0e-9, "duree : 1/2 mesure en 3/4");
+    check (std::fabs (bbdres::seqStepBeats (14, 4.0) - 16.0) < 1.0e-9, "duree : 4 mesures en 4/4");
+    check (std::fabs (bbdres::seqStepBeats (14, 3.0) - 12.0) < 1.0e-9, "duree : 4 mesures en 3/4");
+    check (bbdres::kNumSeqSteps == 15, "nombre de durees de pas");
     std::printf ("sequenceur : %d durees de pas, de %s a %s\n", bbdres::kNumSeqSteps, bbdres::kSeqSteps[0].name, bbdres::kSeqSteps[bbdres::kNumSeqSteps - 1].name);
 }
 
@@ -555,7 +558,7 @@ static void testFactoryPresets()
         { "feedback", { 0, 1 } }, { "loopLP", { 200, 20000 } }, { "lowCut", { 20, 600 } }, { "pultec", { 0, 1 } }, { "loopDyn", { -1, 1 } },
         { "bbd", { 0, 1 } }, { "noise", { 0, 1 } }, { "freeze", { 0, 1 } }, { "holdLen", { 0, 1 } }, { "holdQuant", { 0, 1 } }, { "holdMix", { 0, 1 } },
         { "holdHP", { 20, 20000 } }, { "holdLP", { 20, 20000 } }, { "root", { 0, 11 } }, { "scale", { 0, 11 } }, { "quantize", { 0, 1 } },
-        { "lfoShape", { 0, 5 } }, { "lfoSync", { 0, 11 } }, { "lfoRate", { 0.02f, 20 } }, { "lfoPhase", { 0, 1 } }, { "lfoDepth", { 0, 1 } },
+        { "lfoShape", { 0, 5 } }, { "lfoSync", { 0, 13 } }, { "lfoRate", { 0.02f, 20 } }, { "lfoPhase", { 0, 1 } }, { "lfoDepth", { 0, 1 } },
         { "lfoTarget", { 0, 2 } }, { "drift", { 0, 1 } }, { "spread", { 0, 1 } }, { "cross", { 0, 1 } }, { "mix", { 0, 1 } }, { "outLevel", { -24, 12 } },
         { "seqOn", { 0, 1 } }, { "seqLength", { 1, 16 } }, { "seqStep", { 0, (float) bbdres::kNumSeqSteps - 1 } }, { "seqQuant", { 0, 1 } }, { "seqGlide", { 0, 1 } } };
     int total = 0;
@@ -709,6 +712,62 @@ static void testCqt()
     const double ms = std::chrono::duration<double, std::milli> (std::chrono::steady_clock::now() - t0).count() / 20.0;
     std::printf ("cqt : %d bins, fenetre max %d echantillons, %.2f ms par analyse\n", bbdres::Cqt::kNumBins, n, ms);
     check (ms < 12.0, "cqt : analyse trop lente");
+}
+
+// Citations : nombre, présentation typographique, découpe en phrases, ordre sans répétition
+static void testQuotes()
+{
+    const auto q = bbdquotes::all();
+    size_t longest = 0;
+    for (const auto& s : q) longest = std::max (longest, bbdquotes::normalise (s).size());
+    std::printf ("citations : %zu (la plus longue : %zu octets apres mise en forme)\n", q.size(), longest);
+    check (q.size() >= 200, "citations : il en manque");
+    for (const auto& s : q) check (! bbdquotes::normalise (s).empty(), "citation vide apres mise en forme");
+
+    const std::string nb = "\xC2\xA0";
+    check (bbdquotes::normalise ("\xC2\xAB Bien s\xC3\xBBr, n'est-ce pas ? Oui ; non : peut-\xC3\xAAtre ! \xC2\xBB") ==
+           "Bien s\xC3\xBBr, n\xE2\x80\x99" "est-ce pas" + nb + "? Oui" + nb + "; non" + nb + ": peut-\xC3\xAAtre" + nb + "!", "normalise : guillemets, apostrophe, espaces insecables");
+    check (bbdquotes::normalise ("Aimer \"bien\" mais pas trop") == "Aimer \xC2\xAB" + nb + "bien" + nb + "\xC2\xBB mais pas trop", "normalise : guillemets droits -> « »");
+    check (bbdquotes::normalise ("Sur ce sentiment inconnu. \xC2\xBB") == "Sur ce sentiment inconnu.", "normalise : guillemet fermant seul");
+
+    auto parts = bbdquotes::splitSentences (bbdquotes::normalise ("\xC2\xAB Vivre, au fond, c'\xC3\xA9tait s'arranger. Et ce n'\xC3\xA9tait pas si facile. \xC2\xBB"));
+    check (parts.size() == 2 && parts[0].back() == '.' && parts[1].rfind ("Et ce", 0) == 0, "phrases : deux phrases");
+    parts = bbdquotes::splitSentences (bbdquotes::normalise ("\xC2\xAB On se remet de tout. \xE2\x80\x94 Non. Il y a eu quelque chose. \xC2\xBB"));
+    check (parts.size() == 3 && parts[1].rfind ("\xE2\x80\x94 Non.", 0) == 0, "phrases : dialogue avec tiret cadratin");
+    check (bbdquotes::splitSentences ("Une seule phrase, avec des virgules, et un point final.").size() == 1, "phrases : une seule");
+    check (bbdquotes::splitSentences ("Elle partit\xE2\x80\xA6 puis revint doucement.").size() == 1, "phrases : points de suspension suivis d'une minuscule");
+    size_t multi = 0;
+    for (const auto& s : q) if (bbdquotes::splitSentences (bbdquotes::normalise (s)).size() > 1) ++multi;
+    std::printf ("citations : %zu sur %zu comptent plusieurs phrases (mise a la ligne apres chaque point)\n", multi, q.size());
+
+    // ordre : chaque citation apparait une fois par cycle, et deux graines donnent deux ordres
+    const int n = (int) q.size();
+    std::vector<int> seen ((size_t) n, 0);
+    for (int pos = 0; pos < n; ++pos) ++seen[(size_t) bbdquotes::quoteIndexFor (12345u, pos, n)];
+    check (std::all_of (seen.begin(), seen.end(), [] (int c) { return c == 1; }), "ordre : une citation revient avant la fin du cycle");
+    int diff = 0;
+    for (int pos = 0; pos < n; ++pos) diff += bbdquotes::quoteIndexFor (12345u, pos, n) != bbdquotes::quoteIndexFor (777u, pos, n);
+    check (diff > n / 2, "ordre : deux graines donnent le meme ordre");
+}
+
+// Transition entre deux séquences : de l'ancienne hauteur vers la nouvelle, en douceur, sans saut
+static void testSeqTransition()
+{
+    bbdres::SeqTransition tr;
+    check (tr.apply (7.0f, 0.01f) == 7.0f, "transition : sans demarrage, la cible passe telle quelle");
+    tr.start (0.0f, 0.1f);
+    float mid = 0.0f, last = 0.0f; bool monotonic = true;
+    for (int i = 1; i <= 100; ++i)
+    {
+        const float v = tr.apply (12.0f, 0.001f);
+        if (v < last - 1.0e-6f) monotonic = false;
+        if (i == 50) mid = v;
+        last = v;
+    }
+    check (std::fabs (mid - 6.0f) < 0.3f, "transition : mi-parcours = moitie");
+    check (std::fabs (last - 12.0f) < 1.0e-4f && monotonic, "transition : arrivee sur la cible, sans retour en arriere");
+    check (tr.apply (12.0f, 0.001f) == 12.0f, "transition : terminee");
+    std::printf ("transition de sequence : glide en douceur verifie\n");
 }
 
 // Pas de clic quand le BBD quitte zéro (le filtre ne doit pas s'enclencher d'un coup)
@@ -865,7 +924,8 @@ static void testModulation()
         const float r1 = l.nextAt (4, 0.9f), r2 = l.nextAt (4, 0.95f), r3 = l.nextAt (4, 0.05f);
         check (r1 == r2 && r3 != r2, "sync : le Random change au bouclage");
     }
-    check (bbdres::kNumSync == 12 && bbdres::kSyncBeats[5] == 1.0f && bbdres::kSyncBeats[3] == 4.0f, "table de sync");
+    check (bbdres::kNumSync == 14 && bbdres::kSyncBeats[5] == 1.0f && bbdres::kSyncBeats[3] == 4.0f, "table de sync");
+    check (std::fabs (bbdres::kSyncBeats[12] - 1.0f / 6.0f) < 1.0e-6f && bbdres::kSyncBeats[13] == 0.125f && std::string (bbdres::kSyncNames[12]) == "1/24" && std::string (bbdres::kSyncNames[13]) == "1/32", "LFO : 1/24 et 1/32");
     bbdres::EnvFollower e; e.prepare (3000.0f);
     for (int i = 0; i < 90; ++i) e.next (1.0f);   // 30 ms
     check (e.y > 0.9f, "enveloppe : attaque trop lente");
@@ -895,6 +955,8 @@ int main()
     testNoiseGate();
     testVoices();
     testCqt();
+    testQuotes();
+    testSeqTransition();
     testNoiseAndBbd();
     testBbdClick();
     for (float cr : { 0.25f, 0.5f, 1.0f })
