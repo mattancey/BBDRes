@@ -44,13 +44,13 @@ inline const std::vector<FactoryPreset>& sequenceFactory()
     static const std::vector<FactoryPreset> list = []
     {
         std::vector<FactoryPreset> v;
-        v.push_back (sequence ("Init", 8, 5, 0.0f, true, {}));
-        v.push_back (sequence ("Octaves", 8, 2, 0.0f, true, { 0, 12, 0, 12, 0, 12, 0, 12 }));
-        v.push_back (sequence ("Fifths Climb", 8, 2, 0.1f, true, { 0, 7, 12, 7, 0, 7, 12, 19 }));
-        v.push_back (sequence ("Minor Walk", 8, 2, 0.2f, true, { 0, 3, 7, 10, 12, 10, 7, 3 }));
-        v.push_back (sequence ("Half-Bar Steps", 8, 9, 0.3f, true, { 0, 7, 5, 3, 0, -5, -2, 3 }));
-        v.push_back (sequence ("Slow Drift", 4, 10, 0.8f, true, { 0, 5, 3, 7 }));
-        v.push_back (sequence ("Slow Tide", 4, 11, 1.0f, true, { 0, -5, -3, -7 }));
+        v.push_back (sequence ("Init", 8, 7, 0.0f, true, {}));
+        v.push_back (sequence ("Octaves", 8, 4, 0.0f, true, { 0, 12, 0, 12, 0, 12, 0, 12 }));
+        v.push_back (sequence ("Fifths Climb", 8, 4, 0.1f, true, { 0, 7, 12, 7, 0, 7, 12, 19 }));
+        v.push_back (sequence ("Minor Walk", 8, 4, 0.2f, true, { 0, 3, 7, 10, 12, 10, 7, 3 }));
+        v.push_back (sequence ("Half-Bar Steps", 8, 11, 0.3f, true, { 0, 7, 5, 3, 0, -5, -2, 3 }));
+        v.push_back (sequence ("Slow Drift", 4, 12, 0.8f, true, { 0, 5, 3, 7 }));
+        v.push_back (sequence ("Slow Tide", 4, 13, 1.0f, true, { 0, -5, -3, -7 }));
         return v;
     }();
     return list;
@@ -98,7 +98,7 @@ inline const std::vector<FactoryPreset>& generalFactory()
         FactoryPreset arp { "Glass Arp", {
             { ParamIDs::tune, 60.0f }, { ParamIDs::feedback, 0.88f }, { ParamIDs::loopLP, 12000.0f }, { ParamIDs::bbd, 0.2f },
             { ParamIDs::root, 0.0f }, { ParamIDs::scale, 2.0f }, { ParamIDs::mix, 0.55f }, { ParamIDs::seqOn, 1.0f } } };
-        for (const auto& pv : sequence ("", 8, 2, 0.2f, true, { 0, 3, 7, 10, 12, 10, 7, 3 }).values)
+        for (const auto& pv : sequence ("", 8, 4, 0.2f, true, { 0, 3, 7, 10, 12, 10, 7, 3 }).values)
             arp.values.push_back (pv);
         v.push_back (arp);
         return v;
