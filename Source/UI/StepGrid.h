@@ -28,6 +28,7 @@ public:
             onAttach[i]->sendInitialUpdate();
         }
         lengthP = a.getRawParameterValue (ParamIDs::seqLength);
+        setWantsKeyboardFocus (true);
         startTimerHz (20);
     }
 
@@ -56,6 +57,12 @@ public:
                 g.fillRoundedRectangle (x + 1.0f, 0.0f, colW - 2.0f, (float) getHeight(), 4.0f);
             }
 
+            if (i == selected && hasKeyboardFocus (true))   // pas sélectionné (flèches du clavier)
+            {
+                g.setColour (kText.withAlpha (0.85f));
+                g.drawRoundedRectangle (x + 1.0f, 0.5f, colW - 2.0f, (float) getHeight() - 1.0f, 4.0f, 1.2f);
+            }
+
             // barre de hauteur
             const float yVal = yZero - (value / 24.0f) * (barH * 0.5f);
             const auto bar = juce::Rectangle<float> (x + colW * 0.22f, std::min (yZero, yVal), colW * 0.56f, std::max (2.0f, std::abs (yZero - yVal)));
@@ -79,6 +86,9 @@ public:
     void mouseDown (const juce::MouseEvent& e) override
     {
         const int col = columnAt (e.x);
+        selected = col;
+        grabKeyboardFocus();
+        repaint();
         if ((float) e.y >= (float) getHeight() - 24.0f)
         {
             const bool isOn = onParam[col]->getValue() > 0.5f;
@@ -91,6 +101,27 @@ public:
     {
         if ((float) e.y < (float) getHeight() - 24.0f) setStepFromMouse (e);
     }
+    // Clavier : haut / bas = +1 / -1 demi-ton sur le pas sélectionné (avec Maj : une octave) ; gauche / droite = pas voisin
+    bool keyPressed (const juce::KeyPress& k) override
+    {
+        const int code = k.getKeyCode();
+        const int amount = k.getModifiers().isShiftDown() ? 12 : 1;
+        if (code == juce::KeyPress::upKey)    { nudge (selected, amount);  return true; }
+        if (code == juce::KeyPress::downKey)  { nudge (selected, -amount); return true; }
+        if (code == juce::KeyPress::leftKey)  { selected = juce::jmax (0, selected - 1); repaint(); return true; }
+        if (code == juce::KeyPress::rightKey) { selected = juce::jmin (bbdres::kMaxSeqSteps - 1, selected + 1); repaint(); return true; }
+        return false;
+    }
+    // Molette : +1 / -1 demi-ton sur le pas survolé
+    void mouseWheelMove (const juce::MouseEvent& e, const juce::MouseWheelDetails& w) override
+    {
+        if (w.deltaY == 0.0f) return;
+        selected = columnAt (e.x);
+        nudge (selected, w.deltaY > 0.0f ? 1 : -1);
+    }
+    void focusGained (FocusChangeType) override { repaint(); }
+    void focusLost (FocusChangeType) override { repaint(); }
+
     void mouseDoubleClick (const juce::MouseEvent& e) override
     {
         if ((float) e.y < (float) getHeight() - 24.0f)
@@ -103,9 +134,17 @@ private:
         return juce::jlimit (0, bbdres::kMaxSeqSteps - 1, (int) ((float) x / ((float) getWidth() / (float) bbdres::kMaxSeqSteps)));
     }
 
+    void nudge (int col, int delta)
+    {
+        const float v = valueParam[col]->convertFrom0to1 (valueParam[col]->getValue());
+        valueAttach[col]->setValueAsCompleteGesture (juce::jlimit (-24.0f, 24.0f, std::round (v) + (float) delta));
+        repaint();
+    }
+
     void setStepFromMouse (const juce::MouseEvent& e)
     {
         const int col = columnAt (e.x);
+        selected = col;
         const float barTop = 16.0f, barBottom = (float) getHeight() - 26.0f;
         const float norm = juce::jlimit (0.0f, 1.0f, 1.0f - ((float) e.y - barTop) / (barBottom - barTop));
         const float semis = std::round (norm * 48.0f - 24.0f);
@@ -130,6 +169,6 @@ private:
     std::unique_ptr<juce::ParameterAttachment> valueAttach[bbdres::kMaxSeqSteps];
     std::unique_ptr<juce::ParameterAttachment> onAttach[bbdres::kMaxSeqSteps];
     std::atomic<float>* lengthP = nullptr;
-    int lastCurrent = -2, lastLength = -1;
+    int lastCurrent = -2, lastLength = -1, selected = 0;
 };
 } // namespace bbdui
