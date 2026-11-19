@@ -63,7 +63,7 @@ public:
     }
 
 private:
-    static constexpr int kLabelW = 24, kW = 234, kH = 186;
+    static constexpr int kLabelW = 24, kW = 234, kH = 200;
 
     static float rowOf (float bin)
     {
