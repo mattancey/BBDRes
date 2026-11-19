@@ -117,6 +117,10 @@ private:
     std::atomic<float>* crossP = nullptr;
 
     double currentSampleRate = 44100.0;
+    bbdres::SeqTransition seqTrans;   // glide d'environ 10 % d'un pas quand le contenu de la séquence change
+    unsigned lastSeqHash = 0;
+    bool seqHashValid = false;
+    float lastSeqBase = 48.0f;
     double seqPosAcc = 0.0;      // position du séquenceur (en pas) quand le transport est à l'arrêt
     double syncPhaseAcc = 0.0;   // phase du LFO synchronisé quand le transport est à l'arrêt
 
