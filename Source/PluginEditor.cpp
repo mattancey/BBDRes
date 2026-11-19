@@ -6,23 +6,11 @@
 #include "UI/PresetBar.h"
 #include "UI/SeqSlots.h"
 #include "UI/CqtView.h"
+#include "UI/QuoteView.h"
 
 namespace
 {
 using namespace bbdui;
-
-void dashedBox (juce::Graphics& g, juce::Rectangle<float> r, const juce::String& text)
-{
-    juce::Path outline, dashed;
-    outline.addRoundedRectangle (r, 6.0f);
-    const float dashes[] = { 4.0f, 4.0f };
-    juce::PathStrokeType (1.0f).createDashedStroke (dashed, outline, dashes, 2);
-    g.setColour (kLine);
-    g.strokePath (dashed, juce::PathStrokeType (1.0f));
-    g.setColour (juce::Colour (0xff7d838a));
-    g.setFont (font (10.0f));
-    g.drawText (text, r.toNearestInt(), juce::Justification::centred);
-}
 
 void panel (juce::Graphics& g, juce::Rectangle<int> r, const juce::String& title)
 {
@@ -60,7 +48,7 @@ public:
         add<KeyboardView> (a, proc).setBounds (28, 284, 246, 60);
 
         // --- Analyseur CQT de la sortie wet ---
-        add<CqtView> (proc).setBounds (22, 404, 258, 186);
+        add<CqtView> (proc).setBounds (22, 390, 258, 200);
 
         // --- Resonator ---
         add<Knob> (a, ParamIDs::tune, "TUNE").setBounds (310, 104, 116, 150);
@@ -128,9 +116,12 @@ public:
         // --- Presets généraux et A/B ---
         add<PresetBar> (*proc.presets, bbdpresets::Kind::General, true).setBounds (250, 22, 760, 32);
 
+        // --- Citations ---
+        add<QuoteView> (a).setBounds (964, 400, 300, 196);
+
         // --- Output ---
         add<Knob> (a, ParamIDs::mix, "MIX").setBounds (1030, 626, 64, 88);
-        add<Knob> (a, ParamIDs::outLevel, "LEVEL").setBounds (1120, 626, 64, 88);
+        add<Knob> (a, ParamIDs::outLevel, "WET LEVEL").setBounds (1120, 626, 64, 88);
 
         syncBox->combo.onChange = [this] { updateLfoKnobs(); };
         updateLfoKnobs();
@@ -174,7 +165,7 @@ public:
         // Panneaux
         panel (g, { 16, 72, 270, 118 }, "INPUT");
         panel (g, { 16, 202, 270, 170 }, "PITCH");
-        panel (g, { 16, 384, 270, 212 }, "ANALYSEUR CQT - SORTIE WET");
+        panel (g, { 16, 384, 270, 212 }, "");   // pas de titre : l'analyseur occupe toute la fenêtre
         panel (g, { 298, 72, 654, 524 }, "RESONATOR");
         panel (g, { 964, 72, 300, 186 }, "MOD");
         panel (g, { 964, 270, 300, 118 }, "STEREO");
@@ -185,10 +176,10 @@ public:
         // Légende des mémoires de séquence (clic court = rappel, clic long = mémorise)
         g.setColour (kMuted);
         g.setFont (font (9.0f));
-        g.drawText ("MEMORY", 200, 838, 164, 11, juce::Justification::centred);
+        g.drawText ("LIVE MEMORIES", 200, 838, 164, 11, juce::Justification::centred);
 
         // Zones réservées pour les fonctions à venir
-        dashedBox (g, { 964.0f, 400.0f, 300.0f, 196.0f }, u8 ("RÉSERVÉ"));
+        panel (g, { 964, 400, 300, 196 }, "");   // les citations
 
         // Bandeaux des quatre résonateurs, chacun dans sa couleur (la même que sa courbe)
         for (int v = 0; v < bbdres::kNumVoices; ++v)
