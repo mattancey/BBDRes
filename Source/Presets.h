@@ -67,8 +67,14 @@ public:
         const auto xml = juce::XmlDocument::parse (fileFor (k, name));
         if (xml == nullptr || ! xml->hasTagName ("DarkSwanPreset")) return false;
         std::map<juce::String, float> values;
+        const bool oldLayout = xml->getIntAttribute ("layout", 1) < 2;   // preset d'avant 1/32 et 1/24 : durées de pas décalées de 2
         for (const auto* e : xml->getChildWithTagNameIterator ("PARAM"))
-            values[e->getStringAttribute ("id")] = (float) e->getDoubleAttribute ("value");
+        {
+            const auto id = e->getStringAttribute ("id");
+            float v = (float) e->getDoubleAttribute ("value");
+            if (oldLayout && id == ParamIDs::seqStep) v += 2.0f;
+            values[id] = v;
+        }
         if (k == Kind::General)
         {
             clearSlots();
@@ -90,6 +96,7 @@ public:
         juce::XmlElement xml ("DarkSwanPreset");
         xml.setAttribute ("type", k == Kind::General ? "general" : "sequence");
         xml.setAttribute ("name", legal);
+        xml.setAttribute ("layout", 2);
         for (const auto& kv : snapshot (k))
         {
             auto* e = xml.createNewChildElement ("PARAM");
@@ -193,7 +200,7 @@ private:
 
     static juce::String serialize (const std::map<juce::String, float>& m)
     {
-        juce::String s;
+        juce::String s ("L2|");   // marque de version : les mémoires d'avant n'ont pas ce préfixe
         for (const auto& kv : m)
             s << kv.first << "=" << juce::String (kv.second, 3) << ";";
         return s;
@@ -202,12 +209,17 @@ private:
     static std::map<juce::String, float> deserialize (const juce::String& s)
     {
         std::map<juce::String, float> m;
+        const bool current = s.startsWith ("L2|");
         juce::StringArray parts;
-        parts.addTokens (s, ";", "");
+        parts.addTokens (current ? s.substring (3) : s, ";", "");
         for (const auto& part : parts)
         {
             const int eq = part.indexOfChar ('=');
-            if (eq > 0) m[part.substring (0, eq)] = part.substring (eq + 1).getFloatValue();
+            if (eq <= 0) continue;
+            const auto id = part.substring (0, eq);
+            float v = part.substring (eq + 1).getFloatValue();
+            if (! current && id == ParamIDs::seqStep) v += 2.0f;   // mémoire d'avant 1/32 et 1/24
+            m[id] = v;
         }
         return m;
     }
