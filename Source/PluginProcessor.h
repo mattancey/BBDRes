@@ -6,6 +6,8 @@
 #include "Dsp/Modulation.h"
 #include "Dsp/Sequencer.h"
 #include "Dsp/Voices.h"
+#include "Dsp/FreezeSlots.h"
+#include "Dsp/LoopPlayer.h"
 #include "Presets.h"
 
 class BBDResAudioProcessor : public juce::AudioProcessor
@@ -47,6 +49,10 @@ public:
     std::atomic<float> cqtRing[kCqtRing];
     std::atomic<unsigned> cqtPos { 0 };
     std::atomic<bool> cqtOn { false };
+    // Mémoires de boucles Freeze : enregistrées avec le PROJET (état du plug-in), jamais avec les presets
+    bbdres::FreezeSlotBank freezeBank;
+    std::atomic<int> uiSlotState[bbdres::kNumFreezeSlots];   // 0 vide, 1 pleine, 2 enregistrement, 3 lecture
+    void requestFreezeSlot (int type, int slot) { slotCommand.store (type * 8 + slot, std::memory_order_release); }   // 0 enregistrer, 1 rappeler / arrêter, 2 tout arrêter
     std::atomic<float> uiPitch { 48.0f };  // hauteur réelle du résonateur (LFO, quantification), lue par l'interface
 
 private:
@@ -56,7 +62,7 @@ private:
     struct Targets
     {
         float tune, fine, feedback, inLog2, loopLog2, mix, level, drive, bbd, noise;
-        float lfoRate, lfoOffset, lfoDepth, loopDyn, drift, spread, cross, holdLen, holdMix, holdHpLog2, holdLpLog2, lowCutLog2, pultec;
+        float lfoRate, lfoOffset, lfoDepth, loopDyn, drift, spread, cross, holdLen, holdMix, holdPhase, holdHpLog2, holdLpLog2, lowCutLog2, pultec;
         int curve, root, scale, lfoShape, lfoTarget, lfoSync;
         bool quantize, freeze, holdQuant, seqOn, seqQuant;
         int seqLength, seqStep;
@@ -87,6 +93,7 @@ private:
     std::atomic<float>* holdLenP = nullptr;
     std::atomic<float>* holdQuantP = nullptr;
     std::atomic<float>* holdMixP = nullptr;
+    std::atomic<float>* holdPhaseP = nullptr;
     std::atomic<float>* holdHpP = nullptr;
     std::atomic<float>* holdLpP = nullptr;
     std::atomic<float>* lowCutP = nullptr;
@@ -117,6 +124,12 @@ private:
     std::atomic<float>* crossP = nullptr;
 
     double currentSampleRate = 44100.0;
+    std::atomic<int> slotCommand { -1 };
+    bbdres::LoopRecorder recorder;
+    bbdres::LoopPlayer players[2];   // deux lecteurs : un nouveau rappel fond vers le nouveau pendant que l'ancien s'éteint
+    int activePlayer = 0;
+    bbdres::Smoother holdPhaseSm;
+    void updateSlotStates();
     bbdres::SeqTransition seqTrans;   // glide d'environ 10 % d'un pas quand le contenu de la séquence change
     unsigned lastSeqHash = 0;
     bool seqHashValid = false;
