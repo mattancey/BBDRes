@@ -7,6 +7,7 @@
 #include "UI/SeqSlots.h"
 #include "UI/CqtView.h"
 #include "UI/QuoteView.h"
+#include "UI/FreezeSlots.h"
 
 namespace
 {
@@ -96,12 +97,14 @@ public:
         add<Knob> (a, ParamIDs::cross, "CROSS").setBounds (1056, 288, 64, 88);
 
         // --- Hold (looper) ---
-        add<ToggleBox> (a, ParamIDs::freeze, "FREEZE").setBounds (30, 640, 110, 52);
+        add<ToggleBox> (a, ParamIDs::freeze, "FREEZE").setBounds (30, 636, 150, 44);
+        add<FreezeSlotButtons> (proc).setBounds (30, 688, 150, 30);
         lengthKnob = &add<Knob> (a, ParamIDs::holdLen, "LENGTH", 92);
-        lengthKnob->setBounds (148, 626, 92, 88);
-        add<ToggleBox> (a, ParamIDs::holdQuant, "QUANT").setBounds (250, 650, 62, 28);
-        add<Knob> (a, ParamIDs::holdMix, "HOLD MIX").setBounds (326, 626, 64, 88);
-        add<BandSlider> (a, ParamIDs::holdHP, ParamIDs::holdLP).setBounds (410, 640, 570, 56);
+        lengthKnob->setBounds (190, 626, 92, 88);
+        add<ToggleBox> (a, ParamIDs::holdQuant, "QUANT").setBounds (292, 650, 62, 28);
+        add<Knob> (a, ParamIDs::holdMix, "HOLD MIX").setBounds (366, 626, 64, 88);
+        add<Knob> (a, ParamIDs::holdPhase, "PHASE").setBounds (440, 626, 64, 88);
+        add<BandSlider> (a, ParamIDs::holdHP, ParamIDs::holdLP).setBounds (520, 640, 470, 56);
 
         // --- Séquenceur de pitch ---
         add<PresetBar> (*proc.presets, bbdpresets::Kind::Sequence, false).setBounds (30, 762, 410, 28);
