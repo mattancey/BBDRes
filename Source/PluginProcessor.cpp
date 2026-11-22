@@ -47,8 +47,12 @@ BBDResAudioProcessor::BBDResAudioProcessor()
         voiceSoloP[v] = apvts.getRawParameterValue (ParamIDs::kVoiceSoloIDs[v]);
         uiPitchVoice[v].store (-1.0f);
     }
+    holdPhaseP = apvts.getRawParameterValue (ParamIDs::holdPhase);
+    for (int i = 0; i < bbdres::kNumFreezeSlots; ++i)
+        uiSlotState[i].store (0);
     for (int i = 0; i < kCqtRing; ++i)
         cqtRing[i].store (0.0f, std::memory_order_relaxed);
+    apvts.state.setProperty ("layout", 2, nullptr);   // version de la liste des durées de pas (voir setStateInformation)
     presets = std::make_unique<bbdpresets::PresetManager> (apvts);
     lfoPhaseP  = apvts.getRawParameterValue (ParamIDs::lfoPhase);
     rootP      = apvts.getRawParameterValue (ParamIDs::root);
@@ -171,6 +175,10 @@ juce::AudioProcessorValueTreeState::ParameterLayout BBDResAudioProcessor::create
         juce::ParameterID { ParamIDs::holdMix, 1 }, "Hold Mix",
         Range (0.0f, 1.0f, 0.001f), 1.0f, Attr().withStringFromValueFunction (percent)));
 
+    layout.add (std::make_unique<juce::AudioParameterFloat> (
+        juce::ParameterID { ParamIDs::holdPhase, 1 }, "Hold Phase",
+        Range (0.0f, 1.0f, 0.001f), 0.0f, Attr().withStringFromValueFunction (degrees)));
+
     // Filtre du looper : deux filtres 12 dB (passe-haut à gauche, passe-bas à droite), uniquement sur la boucle
     layout.add (std::make_unique<juce::AudioParameterFloat> (
         juce::ParameterID { ParamIDs::holdHP, 1 }, "Hold HP 12dB",
@@ -271,7 +279,7 @@ juce::AudioProcessorValueTreeState::ParameterLayout BBDResAudioProcessor::create
     for (const auto& d : bbdres::kSeqSteps)
         seqStepNames.add (d.name);
     layout.add (std::make_unique<juce::AudioParameterChoice> (
-        juce::ParameterID { ParamIDs::seqStep, 1 }, "Seq Step", seqStepNames, 5));   // 1/4
+        juce::ParameterID { ParamIDs::seqStep, 1 }, "Seq Step", seqStepNames, 7));   // 1/4
 
     layout.add (std::make_unique<juce::AudioParameterBool> (
         juce::ParameterID { ParamIDs::seqQuant, 1 }, "Seq Quantize", true));
@@ -300,7 +308,7 @@ juce::AudioProcessorValueTreeState::ParameterLayout BBDResAudioProcessor::create
         Range (0.0f, 1.0f, 0.001f), 0.5f, Attr().withStringFromValueFunction (percent)));
 
     layout.add (std::make_unique<juce::AudioParameterFloat> (
-        juce::ParameterID { ParamIDs::outLevel, 1 }, "Level",
+        juce::ParameterID { ParamIDs::outLevel, 1 }, "Wet Level",
         Range (-24.0f, 12.0f, 0.1f), 0.0f, Attr().withLabel ("dB")));
 
     // Fondu entre presets généraux et entre A et B (réglage global : les presets ne le modifient pas)
@@ -328,6 +336,7 @@ BBDResAudioProcessor::Targets BBDResAudioProcessor::readTargets() const
     t.lfoOffset = lfoPhaseP->load();          // décalage de phase du LFO en mode sync (mémorisé à part de Rate)
     t.holdLen   = holdLenP->load();
     t.holdMix   = holdMixP->load();
+    t.holdPhase = holdPhaseP->load();
     t.lowCutLog2 = std::log2 (lowCutP->load());
     t.pultec     = pultecP->load();
     t.holdHpLog2 = std::log2 (holdHpP->load());
@@ -381,6 +390,8 @@ void BBDResAudioProcessor::prepareToPlay (double sampleRate, int)
     currentSampleRate = sampleRate;
     syncPhaseAcc = 0.0;
     seqPosAcc = 0.0;
+    seqTrans = {};
+    seqHashValid = false;
     const float fs = (float) sampleRate;
     const float controlRate = fs / (float) kControlBlock;
 
@@ -422,6 +433,11 @@ void BBDResAudioProcessor::prepareToPlay (double sampleRate, int)
         }
     env.prepare (controlRate);
     noiseGate.prepare (controlRate);
+    holdPhaseSm.prepare (controlRate, 0.03f);   // la phase du Freeze est lissée : les déplacements du potard restent réguliers
+    freezeBank.prepare (fs);   // (ré)alloue les mémoires de boucles, en conservant leur contenu
+    recorder.prepare (fs);
+    for (auto& pl : players) pl.prepare (fs);
+    activePlayer = 0;
 
     const auto t = readTargets();
     for (int v = 0; v < bbdres::kNumVoices; ++v)
@@ -444,6 +460,7 @@ void BBDResAudioProcessor::prepareToPlay (double sampleRate, int)
     holdHpSm.snap (t.holdHpLog2);
     lowCutSm.snap (t.lowCutLog2);
     pultecSm.snap (t.pultec);
+    holdPhaseSm.snap (t.holdPhase);
     holdLpSm.snap (t.holdLpLog2);
     mixPrev = t.mix;
     levelPrev = t.level;
@@ -502,6 +519,61 @@ void BBDResAudioProcessor::processBlock (juce::AudioBuffer<float>& buffer, juce:
 
     constexpr float kMinLoopLog2 = 6.64385619f;   // log2 (100 Hz)
     constexpr float kMaxLoopLog2 = 14.2877124f;   // log2 (20000 Hz)
+
+    // Mémoires de boucles Freeze : commandes venues de l'interface (enregistrer, rappeler, arrêter)
+    {
+        bool anyFrozen = false;
+        int loopLen = 0;
+        for (int v = 0; v < bbdres::kNumVoices; ++v)
+            if (voiceWasActive[v] && resonators[v][0].isFrozen())
+            {
+                anyFrozen = true;
+                if (loopLen == 0) loopLen = resonators[v][0].loopLength();
+            }
+        if (recorder.active() && ! anyFrozen) recorder.abort();   // le Freeze s'est arrêté : l'enregistrement est abandonné
+
+        const int cmd = slotCommand.exchange (-1, std::memory_order_acq_rel);
+        const int type = cmd >= 0 ? cmd / 8 : -1, idx = cmd >= 0 ? cmd % 8 : -1;
+        if (type == 0 && idx < bbdres::kNumFreezeSlots && anyFrozen && ! recorder.active())
+        {
+            for (auto& pl : players)   // on n'écrase pas une mémoire pendant qu'elle joue
+                if (pl.slot() == idx) pl.stopNow();
+            recorder.start (idx, loopLen, (int) (bbdres::Resonator::kFadeSeconds * (float) currentSampleRate));
+        }
+        else if (type == 1 && idx < bbdres::kNumFreezeSlots)
+        {
+            auto& cur = players[activePlayer];
+            if (cur.isPlaying() && cur.slot() == idx)
+                cur.stop();                                    // un nouveau clic sur la boucle qui joue l'arrête
+            else if (freezeBank.used (idx))
+            {
+                const int other = 1 - activePlayer;            // fondu : l'ancien s'éteint, le nouveau entre
+                cur.stop();
+                players[other].start (freezeBank.leftData (idx), freezeBank.rightData (idx), freezeBank.total (idx),
+                                      freezeBank.preroll (idx), idx, t.holdPhase);
+                activePlayer = other;
+            }
+        }
+        else if (type == 2)
+            for (auto& pl : players) pl.stop();
+    }
+
+    // Le contenu de la séquence a changé (mémoire ou preset rappelé, pas modifié, SEQ activé) : la hauteur glisse
+    // de l'ancienne valeur vers la nouvelle (environ 10 % d'un pas) au lieu de sauter.
+    {
+        unsigned hash = (t.seqOn ? 1u : 0u) | (t.seqQuant ? 2u : 0u);
+        hash = hash * 31u + (unsigned) t.seqLength;
+        hash = hash * 31u + (unsigned) t.seqStep;
+        for (int i = 0; i < bbdres::kMaxSeqSteps; ++i)
+            hash = hash * 31u + (unsigned) (juce::roundToInt (t.stepVal[i]) + 64) + (t.stepOn[i] ? 131u : 0u);
+        if (seqHashValid && hash != lastSeqHash)
+        {
+            const double stepSeconds = bbdres::seqStepBeats (t.seqStep, barBeats) * 60.0 / bpm;
+            seqTrans.start (lastSeqBase, (float) juce::jlimit (0.02, 0.4, 0.1 * stepSeconds));
+        }
+        lastSeqHash = hash;
+        seqHashValid = true;
+    }
 
     unsigned cqtWrite = cqtPos.load (std::memory_order_relaxed);
     const bool cqtActive = cqtOn.load (std::memory_order_relaxed);
@@ -575,6 +647,8 @@ void BBDResAudioProcessor::processBlock (juce::AudioBuffer<float>& buffer, juce:
             seqIndex = sq.index;
         }
         uiSeqStep.store (seqIndex);
+        seqBase = seqTrans.apply (seqBase, (float) kControlBlock / (float) currentSampleRate);
+        lastSeqBase = seqBase;
 
         // --- Hauteur commune : séquenceur et LFO (chaque voix y ajoute son intervalle) ---
         const float baseRaw = seqBase + lfoSemis;
@@ -601,6 +675,8 @@ void BBDResAudioProcessor::processBlock (juce::AudioBuffer<float>& buffer, juce:
         rp.noise     = noiseSm.next (t.noise);
         rp.noiseGate = noiseGateGain;
         rp.freeze    = t.freeze ? 1.0f : 0.0f;   // front montant = fige le son
+        rp.holdPhase = holdPhaseSm.next (t.holdPhase);
+        for (auto& pl : players) { pl.setPhase (rp.holdPhase); pl.setFilters (rp.holdHpHz, rp.holdLpHz); }
         const float crossAmt = crossSm.next (t.cross);
         rp.cross     = numCh > 1 ? crossAmt : 0.0f;
         const float mixNew = mixSm.next (t.mix);
@@ -655,14 +731,41 @@ void BBDResAudioProcessor::processBlock (juce::AudioBuffer<float>& buffer, juce:
             const float l = levelPrev + (lvlNew - levelPrev) * k;
 
             // Somme des voix : chacune reçoit le même signal d'entrée
-            float wetSum[2] = { 0.0f, 0.0f };
+            float wetSum[2] = { 0.0f, 0.0f }, preSum[2] = { 0.0f, 0.0f };
             for (int v = 0; v < bbdres::kNumVoices; ++v)
             {
                 if (! voiceActive[v]) continue;
                 // sorties de boucle de l'échantillon précédent, pour le couplage entre les deux canaux de la voix
                 const float crossIn[2] = { resonators[v][1].loopOut(), resonators[v][0].loopOut() };
                 for (int c = 0; c < numCh; ++c)
-                    wetSum[c] += (c == 0 ? voiceGainL[v] : voiceGainR[v]) * resonators[v][c].process (data[c][start + i], crossIn[c]);
+                {
+                    const float gain = c == 0 ? voiceGainL[v] : voiceGainR[v];
+                    wetSum[c] += gain * resonators[v][c].process (data[c][start + i], crossIn[c]);
+                    preSum[c] += gain * resonators[v][c].loopPreOut();   // la boucle gelée, avant les filtres du Hold
+                }
+            }
+
+            // Enregistrement d'une mémoire : un tour complet de la boucle gelée, stéréo, pendant qu'elle tourne
+            if (recorder.active() && recorder.push (preSum[0], numCh > 1 ? preSum[1] : preSum[0]))
+                freezeBank.commit (recorder.slotIndex(), recorder.left(), recorder.right(), recorder.length(), recorder.preroll());
+
+            // Lecture des mémoires : la boucle rappelée remplace peu à peu le son wet (Hold Mix règle la part)
+            if (players[0].active() || players[1].active())
+            {
+                float out[2][2] = {};
+                players[0].process (out[0][0], out[0][1]);
+                players[1].process (out[1][0], out[1][1]);
+                const float e0 = players[0].envelope(), e1 = players[1].envelope(), es = e0 + e1;
+                if (es > 1.0e-6f)
+                {
+                    const float kk = t.holdMix * std::min (1.0f, es);
+                    for (int c = 0; c < numCh; ++c)
+                    {
+                        const float a = numCh > 1 ? out[0][c] : 0.5f * (out[0][0] + out[0][1]);
+                        const float b = numCh > 1 ? out[1][c] : 0.5f * (out[1][0] + out[1][1]);
+                        wetSum[c] += ((a * e0 + b * e1) / es - wetSum[c]) * kk;
+                    }
+                }
             }
             if (cqtActive)   // analyseur : la sortie wet, avant le mélange avec le signal sec
             {
@@ -673,13 +776,25 @@ void BBDResAudioProcessor::processBlock (juce::AudioBuffer<float>& buffer, juce:
             {
                 float& s = data[c][start + i];
                 const float dry = s;
-                s = (dry + (wetSum[c] - dry) * m) * l;
+                s = dry + (wetSum[c] * l - dry) * m;   // Level n'agit que sur le signal wet : dry * (1 - Mix) + wet * Level * Mix
             }
         }
         mixPrev = mixNew;
         levelPrev = lvlNew;
     }
     cqtPos.store (cqtWrite, std::memory_order_release);
+    updateSlotStates();
+}
+
+void BBDResAudioProcessor::updateSlotStates()
+{
+    for (int i = 0; i < bbdres::kNumFreezeSlots; ++i)
+    {
+        int s = freezeBank.used (i) ? 1 : 0;
+        if (recorder.active() && recorder.slotIndex() == i) s = 2;
+        else if ((players[0].active() && players[0].slot() == i) || (players[1].active() && players[1].slot() == i)) s = 3;
+        uiSlotState[i].store (s, std::memory_order_relaxed);
+    }
 }
 
 juce::AudioProcessorEditor* BBDResAudioProcessor::createEditor()
@@ -690,14 +805,61 @@ juce::AudioProcessorEditor* BBDResAudioProcessor::createEditor()
 void BBDResAudioProcessor::getStateInformation (juce::MemoryBlock& destData)
 {
     if (auto xml = apvts.copyState().createXml())
+    {
+        // Les boucles Freeze mémorisées vont dans l'état du PROJET uniquement (int16 stéréo, en base64) :
+        // les presets du plug-in ne les contiennent jamais.
+        auto* slots = xml->createNewChildElement ("FREEZESLOTS");
+        for (int i = 0; i < bbdres::kNumFreezeSlots; ++i)
+        {
+            std::vector<float> l, r;
+            float sr = 0.0f;
+            int pre = 0;
+            if (! freezeBank.exportSlot (i, l, r, sr, pre) || l.empty()) continue;
+            const auto enc = bbdres::encodeSlot (l.data(), r.data(), (int) l.size());
+            auto* e = slots->createNewChildElement ("SLOT");
+            e->setAttribute ("index", i);
+            e->setAttribute ("sr", (double) sr);
+            e->setAttribute ("pre", pre);
+            e->setAttribute ("data", juce::MemoryBlock (enc.data(), enc.size() * sizeof (std::int16_t)).toBase64Encoding());
+        }
+        if (slots->getNumChildElements() == 0)
+            xml->removeChildElement (slots, true);
         copyXmlToBinary (*xml, destData);
+    }
 }
 
 void BBDResAudioProcessor::setStateInformation (const void* data, int sizeInBytes)
 {
     if (auto xml = getXmlFromBinary (data, sizeInBytes))
         if (xml->hasTagName (apvts.state.getType()))
-            apvts.replaceState (juce::ValueTree::fromXml (*xml));
+        {
+            freezeBank.clearAll();
+            if (auto* slots = xml->getChildByName ("FREEZESLOTS"))   // boucles Freeze mémorisées avec ce projet
+            {
+                for (auto* e : slots->getChildWithTagNameIterator ("SLOT"))
+                {
+                    const int idx = e->getIntAttribute ("index", -1);
+                    juce::MemoryBlock mb;
+                    std::vector<float> l, r;
+                    if (idx >= 0 && idx < bbdres::kNumFreezeSlots && mb.fromBase64Encoding (e->getStringAttribute ("data"))
+                        && bbdres::decodeSlot (static_cast<const std::int16_t*> (mb.getData()), mb.getSize() / sizeof (std::int16_t), l, r))
+                        freezeBank.load (idx, std::move (l), std::move (r), (float) e->getDoubleAttribute ("sr", 48000.0), e->getIntAttribute ("pre"));
+                }
+                xml->removeChildElement (slots, true);   // ne reste pas dans l'état des réglages
+            }
+            auto tree = juce::ValueTree::fromXml (*xml);
+            if ((int) tree.getProperty ("layout", 1) < 2)   // projet enregistré avant 1/32 et 1/24 : les durées de pas ont glissé de deux rangs
+            {
+                for (int i = 0; i < tree.getNumChildren(); ++i)
+                {
+                    auto child = tree.getChild (i);
+                    if (child.hasType ("PARAM") && child.getProperty ("id").toString() == ParamIDs::seqStep)
+                        child.setProperty ("value", (float) child.getProperty ("value") + 2.0f, nullptr);
+                }
+                tree.setProperty ("layout", 2, nullptr);
+            }
+            apvts.replaceState (tree);
+        }
 }
 
 juce::AudioProcessor* JUCE_CALLTYPE createPluginFilter()
