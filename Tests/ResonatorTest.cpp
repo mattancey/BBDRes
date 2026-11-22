@@ -6,6 +6,8 @@
 #include "../Source/Dsp/Sequencer.h"
 #include "../Source/Dsp/Voices.h"
 #include "../Source/Dsp/Cqt.h"
+#include "../Source/Dsp/FreezeSlots.h"
+#include "../Source/Dsp/LoopPlayer.h"
 #include "../Source/Quotes.h"
 #include <chrono>
 #include "../Source/FactoryPresets.h"
@@ -556,7 +558,7 @@ static void testFactoryPresets()
     const std::map<std::string, std::pair<float, float>> range = {
         { "drive", { 0, 1 } }, { "driveCurve", { 0, 2 } }, { "inputLP", { 200, 20000 } }, { "tune", { 24, 96 } }, { "fine", { -100, 100 } },
         { "feedback", { 0, 1 } }, { "loopLP", { 200, 20000 } }, { "lowCut", { 20, 600 } }, { "pultec", { 0, 1 } }, { "loopDyn", { -1, 1 } },
-        { "bbd", { 0, 1 } }, { "noise", { 0, 1 } }, { "freeze", { 0, 1 } }, { "holdLen", { 0, 1 } }, { "holdQuant", { 0, 1 } }, { "holdMix", { 0, 1 } },
+        { "bbd", { 0, 1 } }, { "noise", { 0, 1 } }, { "freeze", { 0, 1 } }, { "holdLen", { 0, 1 } }, { "holdQuant", { 0, 1 } }, { "holdMix", { 0, 1 } }, { "holdPhase", { 0, 1 } },
         { "holdHP", { 20, 20000 } }, { "holdLP", { 20, 20000 } }, { "root", { 0, 11 } }, { "scale", { 0, 11 } }, { "quantize", { 0, 1 } },
         { "lfoShape", { 0, 5 } }, { "lfoSync", { 0, 13 } }, { "lfoRate", { 0.02f, 20 } }, { "lfoPhase", { 0, 1 } }, { "lfoDepth", { 0, 1 } },
         { "lfoTarget", { 0, 2 } }, { "drift", { 0, 1 } }, { "spread", { 0, 1 } }, { "cross", { 0, 1 } }, { "mix", { 0, 1 } }, { "outLevel", { -24, 12 } },
@@ -770,6 +772,159 @@ static void testSeqTransition()
     std::printf ("transition de sequence : glide en douceur verifie\n");
 }
 
+// Phase du Freeze : la lecture tourne d'un tour de boucle au plus ; tourner le potard ne fait aucun clic
+static void testHoldPhase()
+{
+    const float fs = 48000.0f;
+    std::vector<float> src;
+    { float lp = 0.0f; for (int i = 0; i < 48000 * 6; ++i) { lp += 0.05f * (0.3f * rnd() - lp); src.push_back (lp * 4.0f); } }
+    auto frozen = [&] (float phase)
+    {
+        Resonator r; r.prepare (fs, 1u);
+        ResonatorParams p; p.semitones = 48.0f; p.feedback = 0.7f; p.inputLpHz = 8000.0f; p.loopLpHz = 6000.0f; p.bbd = 0.3f; p.holdSeconds = 0.25f; p.holdPhase = phase;
+        r.update (p); r.reset();
+        for (int i = 0; i < 96000; ++i) { if (i % 16 == 0) r.update (p); r.process (src[(size_t) i]); }
+        p.freeze = 1.0f;
+        std::vector<float> y;
+        for (int i = 0; i < 48000 * 3; ++i) { if (i % 16 == 0) r.update (p); const float v = r.process (src[(size_t) (96000 + i)]); if (i >= 48000) y.push_back (v); }
+        return y;
+    };
+    const auto a = frozen (0.0f), b = frozen (0.25f);
+    double s2 = 0.0; for (float v : a) s2 += (double) v * v;
+    const float rmsA = (float) std::sqrt (s2 / (double) a.size());
+    float e0 = 0.0f, e1 = 0.0f;
+    for (size_t n = 0; n < 24000; ++n) { e0 = std::max (e0, std::fabs (b[n] - a[n])); e1 = std::max (e1, std::fabs (b[n] - a[n + 3000])); }
+    std::printf ("phase du freeze : decalage 25 %% -> ecart a la boucle d'origine %.4f, a la boucle tournee de 3000 echantillons %.5f (niveau %.3f)\n", e0, e1, rmsA);
+    check (e1 < 0.02f * rmsA, "phase : la boucle n'est pas tournee du bon nombre d'echantillons");
+    check (e0 > 0.3f * rmsA, "phase : le decalage ne change rien");
+
+    // balayage continu du potard pendant la lecture, sur un signal périodique : pas de saut, niveau conservé
+    const double f0 = 440.0 * std::pow (2.0, (48.0 - 69.0) / 12.0);
+    Resonator r; r.prepare (fs);
+    ResonatorParams p; p.semitones = 48.0f; p.feedback = 0.9f; p.inputLpHz = 8000.0f; p.loopLpHz = 6000.0f; p.holdSeconds = 0.2347f;
+    r.update (p); r.reset();
+    int n = 0;
+    auto tone = [&] { return (float) (0.3 * std::sin (2.0 * 3.14159265358979 * f0 * n++ / (double) fs)); };
+    for (int i = 0; i < 192000; ++i) { if (i % 16 == 0) r.update (p); r.process (tone()); }
+    p.freeze = 1.0f;
+    for (int i = 0; i < 48000; ++i) { if (i % 16 == 0) r.update (p); r.process (tone()); }
+    float prev = 0.0f, baseJump = 0.0f, sweepJump = 0.0f, lvlBase = 0.0f, lvlSweep = 0.0f; bool finite = true;
+    for (int i = 0; i < 48000; ++i)
+    {
+        if (i % 16 == 0) r.update (p);
+        const float y = r.process (tone());
+        if (i > 0) baseJump = std::max (baseJump, std::fabs (y - prev));
+        lvlBase = std::max (lvlBase, std::fabs (y)); prev = y;
+    }
+    const int sweepLen = 38400;
+    for (int i = 0; i < sweepLen + 24000; ++i)
+    {
+        p.holdPhase = std::min (1.0f, (float) i / (float) sweepLen);
+        if (i % 16 == 0) r.update (p);
+        const float y = r.process (tone());
+        if (! std::isfinite (y)) finite = false;
+        sweepJump = std::max (sweepJump, std::fabs (y - prev));
+        lvlSweep = std::max (lvlSweep, std::fabs (y)); prev = y;
+    }
+    std::printf ("phase du freeze : balayage 0 -> 100 %% en 0,8 s : saut max %.4f (reference %.4f), niveau max %.3f (reference %.3f)\n", sweepJump, baseJump, lvlSweep, lvlBase);
+    check (finite, "phase : valeur non finie pendant le balayage");
+    check (sweepJump < 1.8f * baseJump, "phase : clic pendant le balayage du potard");
+    check (lvlSweep < 1.5f * lvlBase, "phase : le niveau gonfle pendant le balayage");
+}
+
+// Mémoires de boucles Freeze : conversion, banque, enregistreur et lecteur
+static void testFreezeSlots()
+{
+    const float fs = 48000.0f;
+    // conversion int16 : aller-retour
+    {
+        std::vector<float> l, r;
+        for (int i = 0; i < 1000; ++i) { l.push_back (rnd()); r.push_back (rnd()); }
+        const auto enc = bbdres::encodeSlot (l.data(), r.data(), 1000);
+        std::vector<float> l2, r2;
+        check (bbdres::decodeSlot (enc.data(), enc.size(), l2, r2) && l2.size() == 1000, "memoire : decodage");
+        float e = 0.0f; for (int i = 0; i < 1000; ++i) e = std::max (e, std::max (std::fabs (l[(size_t) i] - l2[(size_t) i]), std::fabs (r[(size_t) i] - r2[(size_t) i])));
+        check (e < 1.0f / 32000.0f, "memoire : erreur de quantification int16");
+        check (! bbdres::decodeSlot (enc.data(), 3, l2, r2), "memoire : taille impaire refusee");
+    }
+    // changement de fréquence d'échantillonnage : un sinus de 440 Hz reste à 440 Hz
+    {
+        std::vector<float> in (44100);
+        for (size_t i = 0; i < in.size(); ++i) in[i] = std::sin (2.0f * 3.14159265f * 440.0f * (float) i / 44100.0f);
+        const auto out = bbdres::resampleCubic (in, 44100.0f, 48000.0f);
+        int zc = 0; for (size_t i = 1; i < out.size(); ++i) if (out[i - 1] < 0.0f && out[i] >= 0.0f) ++zc;
+        const double hz = (double) zc * 48000.0 / (double) out.size();
+        std::printf ("memoire : sinus 440 Hz a 44,1 kHz relu a 48 kHz = %.1f Hz (%zu echantillons)\n", hz, out.size());
+        check (std::fabs (hz - 440.0) < 2.0, "memoire : le reechantillonnage change la hauteur");
+    }
+    // aller-retour avec un vrai looper : la lecture mémorisée prolonge exactement la boucle gelée
+    std::vector<float> src;
+    { float lp = 0.0f; for (int i = 0; i < 48000 * 6; ++i) { lp += 0.05f * (0.3f * rnd() - lp); src.push_back (lp * 4.0f); } }
+    Resonator r; r.prepare (fs, 1u);
+    ResonatorParams p; p.semitones = 48.0f; p.feedback = 0.7f; p.inputLpHz = 8000.0f; p.loopLpHz = 6000.0f; p.bbd = 0.3f; p.holdSeconds = 0.3f;
+    r.update (p); r.reset();
+    size_t k = 0;
+    auto step = [&] { if (k % 16 == 0) r.update (p); const float y = r.process (src[k % src.size()]); ++k; return y; };
+    for (int i = 0; i < 96000; ++i) step();
+    p.freeze = 1.0f;
+    for (int i = 0; i < 48000; ++i) step();
+    check (r.isFrozen(), "memoire : le looper n'est pas fige");
+
+    bbdres::FreezeSlotBank bank; bank.prepare (fs);
+    bbdres::LoopRecorder rec; rec.prepare (fs);
+    const int len = r.loopLength(), pre = (int) (Resonator::kFadeSeconds * fs);
+    check (rec.start (2, len, pre), "memoire : l'enregistreur refuse de demarrer");
+    while (rec.active()) { step(); const float v = r.loopPreOut(); rec.push (v, -0.5f * v); }
+    bank.commit (rec.slotIndex(), rec.left(), rec.right(), rec.length(), rec.preroll());
+    check (bank.used (2) && ! bank.used (0) && bank.total (2) == len + pre, "memoire : banque apres enregistrement");
+    const auto pk = bank.peaks (2, 32);
+    check (pk.size() == 32 && *std::max_element (pk.begin(), pk.end()) > 0.01f, "memoire : forme d'onde vide");
+
+    bbdres::LoopPlayer pl; pl.prepare (fs); pl.setFilters (20.0f, 20000.0f);
+    check (pl.start (bank.leftData (2), bank.rightData (2), bank.total (2), bank.preroll (2), 2, 0.0f), "memoire : le lecteur refuse de demarrer");
+    float maxErr = 0.0f, maxErrR = 0.0f; double s2 = 0.0;
+    for (int i = 0; i < 2 * len; ++i)
+    {
+        step();
+        const float want = r.loopPreOut();
+        float ol, orr; pl.process (ol, orr);
+        maxErr = std::max (maxErr, std::fabs (ol - want));
+        maxErrR = std::max (maxErrR, std::fabs (orr + 0.5f * want));
+        s2 += (double) want * want;
+    }
+    const float rms = (float) std::sqrt (s2 / (2.0 * len));
+    std::printf ("memoire : lecture vs boucle gelee d'origine, sur 2 tours : ecart max %.5f (gauche), %.5f (droite), niveau %.3f\n", maxErr, maxErrR, rms);
+    check (maxErr < 0.01f * rms && maxErrR < 0.01f * rms, "memoire : la lecture ne prolonge pas la boucle d'origine");
+
+    // phase : la lecture est tournee de la fraction demandee
+    bbdres::LoopPlayer p0, p1; p0.prepare (fs); p1.prepare (fs); p0.setFilters (20.0f, 20000.0f); p1.setFilters (20.0f, 20000.0f);
+    p0.start (bank.leftData (2), bank.rightData (2), bank.total (2), bank.preroll (2), 2, 0.0f);
+    p1.start (bank.leftData (2), bank.rightData (2), bank.total (2), bank.preroll (2), 2, 0.25f);
+    std::vector<float> a0, a1; float ol, orr;
+    for (int i = 0; i < 2 * len; ++i) { p0.process (ol, orr); a0.push_back (ol); p1.process (ol, orr); a1.push_back (ol); }
+    const int shift = (int) std::lround (0.25 * len);
+    float e = 0.0f; for (int i = 0; i < len; ++i) e = std::max (e, std::fabs (a1[(size_t) i] - a0[(size_t) (i + shift)]));
+    check (e < 0.01f * rms, "memoire : la phase du lecteur ne tourne pas la boucle");
+
+    // sortie : rampe de 0,5 s ; les filtres du Hold agissent sur la boucle rappelee
+    p0.stop();
+    int n = 0; while (p0.active() && n < 100000) { p0.process (ol, orr); ++n; }
+    std::printf ("memoire : sortie en %d echantillons (attendu 24000)\n", n);
+    check (std::abs (n - 24000) < 600, "memoire : la sortie ne dure pas 0,5 s");
+    bbdres::LoopPlayer pf; pf.prepare (fs); pf.setFilters (3000.0f, 20000.0f);
+    pf.start (bank.leftData (2), bank.rightData (2), bank.total (2), bank.preroll (2), 2, 0.0f);
+    double sf = 0.0; for (int i = 0; i < 2 * len; ++i) { pf.process (ol, orr); sf += (double) ol * ol; }
+    check (std::sqrt (sf / (2.0 * len)) < 0.6 * rms, "memoire : le passe-haut du Hold n'agit pas sur la boucle rappelee");
+
+    // changement de fréquence d'échantillonnage du projet : la mémoire reste utilisable, durée conservée
+    const int before = bank.total (2);
+    bank.prepare (44100.0f);
+    check (bank.used (2), "memoire : perdue au changement de frequence");
+    check (std::abs (bank.total (2) - (int) std::lround ((double) before * 44100.0 / 48000.0)) <= 3, "memoire : duree alteree au changement de frequence");
+    std::vector<float> el, er; float esr = 0.0f; int epre = 0;
+    check (bank.exportSlot (2, el, er, esr, epre) && esr == 44100.0f, "memoire : export");
+}
+
 // Pas de clic quand le BBD quitte zéro (le filtre ne doit pas s'enclencher d'un coup)
 static void testBbdClick()
 {
@@ -957,6 +1112,8 @@ int main()
     testCqt();
     testQuotes();
     testSeqTransition();
+    testHoldPhase();
+    testFreezeSlots();
     testNoiseAndBbd();
     testBbdClick();
     for (float cr : { 0.25f, 0.5f, 1.0f })
