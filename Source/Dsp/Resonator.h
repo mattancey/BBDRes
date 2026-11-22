@@ -166,6 +166,7 @@ struct ResonatorParams
     float freeze = 0.0f;       // > 0.5 : le looper capture le son et le rejoue
     float holdSeconds = 0.35f; // longueur de la boucle, en secondes (déjà quantifiée si besoin)
     float holdMix = 1.0f;      // 0..1 : boucle contre son d'origine
+    float holdPhase = 0.0f;    // 0..1 : tour de boucle, décalage de la lecture (phase du Freeze)
     float holdSpeedSemis = 0.0f; // petite variation de vitesse de lecture (dérive de la mémoire)
     float holdHpHz = 20.0f;    // passe-haut 12 dB du looper uniquement (20 Hz = ouvert)
     float holdLpHz = 20000.0f; // passe-bas 12 dB du looper uniquement (20 kHz = ouvert)
@@ -304,6 +305,7 @@ public:
         lpF.setLowpass (lpHz, fs);
 
         holdMix = std::clamp (p.holdMix, 0.0f, 1.0f);
+        holdPhase = std::clamp (p.holdPhase, 0.0f, 1.0f);
         loopSpeed = std::exp2 (std::clamp (p.holdSpeedSemis, -2.0f, 2.0f) / 12.0f);
         targetLen = (int) std::lround (std::clamp (p.holdSeconds, kHoldMinSeconds, kHoldMaxSeconds) * fs);
         const bool wantFrozen = p.freeze > 0.5f;
@@ -319,6 +321,15 @@ public:
         {
             applyLength (targetLen, true);          // longueur modifiée en temps réel
             sinceLenChange = 0;
+        }
+
+        // Phase du Freeze : la lecture se décale d'un tour de boucle au plus. Chaque déplacement est un fondu de 12 ms,
+        // au plus un toutes les 20 ms : tourner le potard ne fait jamais de clic.
+        if (frozen && xfLeft == 0 && sincePhaseMove >= (int) (kLenChangeSeconds * fs))
+        {
+            float d = holdPhase - phaseApplied;
+            d -= std::round (d);   // la phase est circulaire : chemin le plus court
+            if (std::fabs (d) * (float) cur.L >= 24.0f) movePhase (d);
         }
     }
 
@@ -353,10 +364,12 @@ public:
 
         // Sortie humide = sortie de la ligne (v), mélangée à la boucle qui repasse par les mêmes filtres
         float out = v;
+        lastPre = 0.0f;
         if (frozen || fzMix > 0.0f)
         {
             float vf = loopF.process (loopSample());
             vf += (bwF.process (vf) - vf) * bwMix;
+            lastPre = vf;   // la boucle telle qu'on l'entend, avant les filtres HP / LP du Hold (pour les mémoires)
             vf += (hpF.process (vf) - vf) * hpAmt;
             vf += (lpF.process (vf) - vf) * lpAmt;
             out += (vf - v) * fzMix;
@@ -368,11 +381,14 @@ public:
                 if (fzMix < 1.0e-4f) fzMix = 0.0f;
             }
             ++sinceLenChange;
+            ++sincePhaseMove;
         }
         return out;
     }
     float loopOut() const { return lastLoop; }
     int loopLength() const { return cur.L; }   // longueur de la boucle en cours (échantillons)
+    bool isFrozen() const { return frozen; }
+    float loopPreOut() const { return lastPre; }   // sortie de la boucle avant les filtres du Hold (0 hors Freeze)
 
 private:
     // Une « tête » de lecture : position p dans la fenêtre [S, E), longueur L, fondu de raccord X
@@ -471,6 +487,19 @@ private:
         cur = nh;
     }
 
+    // Décale la lecture de d tours de boucle, avec un fondu entre l'ancienne et la nouvelle position
+    void movePhase (float d)
+    {
+        prevH = cur;
+        xfLen = fadeSamples;
+        xfLeft = xfLen;
+        cur.p += d * (float) cur.L;
+        while (cur.p >= (float) cur.E) cur.p -= (float) cur.L;
+        while (cur.p < (float) cur.S) cur.p += (float) cur.L;
+        phaseApplied += d;
+        sincePhaseMove = 0;
+    }
+
     // Capture : copie des dernières secondes, puis boucle de la longueur demandée, lue depuis son début
     void captureLoop()
     {
@@ -478,7 +507,9 @@ private:
             fzBuf[(size_t) n] = rec[(size_t) ((recW - fzCap + n) & recMask)];
         cur = Head {};
         applyLength (targetLen, false);
-        cur.p = (float) cur.S;
+        cur.p = (float) cur.S + holdPhase * (float) cur.L;   // la phase réglée avant le gel est respectée
+        phaseApplied = holdPhase;
+        sincePhaseMove = 0;
         xfLeft = 0;
         loopF.reset(); bwF.reset(); hpF.reset(); lpF.reset();
         sinceLenChange = 0;
@@ -516,7 +547,8 @@ private:
     int recMask = 0, recW = 0, fzCap = 0, fadeSamples = 8, searchSamples = 0;
     bool frozen = false;
     float fzMix = 0.0f, fzSlew = 0.001f, holdMix = 1.0f, loopSpeed = 1.0f, relStep = 0.0f, hpAmt = 0.0f, lpAmt = 0.0f, lowAmt = 0.0f;
-    int targetLen = 16000, sinceLenChange = 0, xfLeft = 0, xfLen = 1;
+    int targetLen = 16000, sinceLenChange = 0, xfLeft = 0, xfLen = 1, sincePhaseMove = 0;
+    float holdPhase = 0.0f, phaseApplied = 0.0f, lastPre = 0.0f;
     Head cur, prevH;
 };
 } // namespace bbdres
