@@ -1,554 +1,64 @@
 #pragma once
 
-// Coeur DSP de BBDRes : C++ standard uniquement (aucune dépendance JUCE),
-// pour pouvoir être testé séparément du plug-in.
-
-#include <algorithm>
-#include <cmath>
-#include <complex>
-#include <cstdint>
-#include <vector>
-
-namespace bbdres
+// Identifiants des paramètres de BBDRes V2 : NE PLUS LES CHANGER une fois des presets
+// ou de l'automation enregistrés dans Live.
+namespace ParamIDs
 {
-constexpr float kPi = 3.14159265358979323846f;
-
-// Mémoire du looper (Freeze) : de 30 ms à 4 s
-inline constexpr float kHoldMinSeconds = 0.03f;
-inline constexpr float kHoldMaxSeconds = 4.0f;
-
-// Lissage à la cadence de contrôle (un appel par sous-bloc)
-struct Smoother
-{
-    float y = 0.0f, coef = 1.0f;
-    void prepare (float controlRate, float tauSeconds)
-    {
-        coef = 1.0f - std::exp (-1.0f / (tauSeconds * controlRate));
-    }
-    void snap (float v) { y = v; }
-    float next (float target) { y += coef * (target - y); return y; }
-};
-
-// Passe-bas 12 dB/oct (Butterworth), forme transposée DF2
-struct Biquad
-{
-    float b0 = 1, b1 = 0, b2 = 0, a1 = 0, a2 = 0, z1 = 0, z2 = 0;
-
-    void setLowpass (float fc, float fs)
-    {
-        fc = std::clamp (fc, 10.0f, 0.45f * fs);
-        const float w0 = 2.0f * kPi * fc / fs;
-        const float cw = std::cos (w0), sw = std::sin (w0);
-        const float alpha = sw / (2.0f * 0.70710678f);
-        const float a0 = 1.0f + alpha;
-        b0 = (1.0f - cw) * 0.5f / a0;
-        b1 = (1.0f - cw) / a0;
-        b2 = b0;
-        a1 = -2.0f * cw / a0;
-        a2 = (1.0f - alpha) / a0;
-    }
-    void setHighpass (float fc, float fs)
-    {
-        fc = std::clamp (fc, 10.0f, 0.45f * fs);
-        const float w0 = 2.0f * kPi * fc / fs;
-        const float cw = std::cos (w0), sw = std::sin (w0);
-        const float alpha = sw / (2.0f * 0.70710678f);
-        const float a0 = 1.0f + alpha;
-        b0 = (1.0f + cw) * 0.5f / a0;
-        b1 = -(1.0f + cw) / a0;
-        b2 = b0;
-        a1 = -2.0f * cw / a0;
-        a2 = (1.0f - alpha) / a0;
-    }
-    float process (float x)
-    {
-        const float y = b0 * x + z1;
-        z1 = b1 * x - a1 * y + z2;
-        z2 = b2 * x - a2 * y;
-        return y;
-    }
-    void reset() { z1 = z2 = 0.0f; }
-
-    // Réponse complexe à la fréquence f
-    std::complex<float> response (float f, float fs) const
-    {
-        const float w = 2.0f * kPi * f / fs;
-        const std::complex<float> zi = std::polar (1.0f, -w);
-        const std::complex<float> z2c = zi * zi;
-        return (b0 + b1 * zi + b2 * z2c) / (1.0f + a1 * zi + a2 * z2c);
-    }
-
-    // Retard de phase (en échantillons) à la fréquence f
-    float phaseDelay (float f, float fs) const
-    {
-        const float w = 2.0f * kPi * f / fs;
-        if (w < 1.0e-6f) return 0.0f;
-        return -std::arg (response (f, fs)) / w;
-    }
-};
-
-// Passe-bas 6 dB/oct
-struct OnePole
-{
-    float a = 0.0f, y1 = 0.0f;
-
-    void setCutoff (float fc, float fs)
-    {
-        fc = std::clamp (fc, 10.0f, 0.45f * fs);
-        a = std::exp (-2.0f * kPi * fc / fs);
-    }
-    float process (float x) { y1 = (1.0f - a) * x + a * y1; return y1; }
-    void reset() { y1 = 0.0f; }
-
-    float phaseDelay (float f, float fs) const
-    {
-        const float w = 2.0f * kPi * f / fs;
-        if (w < 1.0e-6f) return a / (1.0f - a);
-        return std::atan2 (a * std::sin (w), 1.0f - a * std::cos (w)) / w;
-    }
-};
-
-// Bloqueur de continu (5 Hz), placé à l'entrée uniquement
-struct DcBlocker
-{
-    float x1 = 0.0f, y1 = 0.0f, r = 0.999f;
-    void prepare (float fs) { r = 1.0f - 2.0f * kPi * 5.0f / fs; }
-    float process (float x) { const float y = x - x1 + r * y1; x1 = x; y1 = y; return y; }
-    void reset() { x1 = y1 = 0.0f; }
-};
-
-// Ligne à retard avec lecture fractionnaire (interpolation cubique de Hermite)
-class DelayLine
-{
-public:
-    void prepare (int maxDelaySamples)
-    {
-        int n = 1;
-        while (n < maxDelaySamples + 8) n <<= 1;
-        buf.assign ((size_t) n, 0.0f);
-        mask = n - 1;
-        w = 0;
-    }
-    void reset() { std::fill (buf.begin(), buf.end(), 0.0f); w = 0; }
-    void push (float x) { buf[(size_t) w] = x; w = (w + 1) & mask; }
-
-    // Lecture AVANT push : un retard de d échantillons (d >= 2)
-    float read (float d) const
-    {
-        const int di = (int) d;
-        const float x = 1.0f - (d - (float) di);
-        const float ym1 = at (di + 2), y0 = at (di + 1), y1 = at (di), y2 = at (di - 1);
-        const float c1 = 0.5f * (y1 - ym1);
-        const float c2 = ym1 - 2.5f * y0 + 2.0f * y1 - 0.5f * y2;
-        const float c3 = 0.5f * (y2 - ym1) + 1.5f * (y0 - y1);
-        return ((c3 * x + c2) * x + c1) * x + y0;
-    }
-    int size() const { return mask + 1; }
-
-private:
-    float at (int k) const { return buf[(size_t) ((w - k) & mask)]; }
-    std::vector<float> buf;
-    int mask = 0, w = 0;
-};
-
-// Réglages d'un résonateur (valeurs déjà lissées)
-struct ResonatorParams
-{
-    float semitones = 48.0f;   // note MIDI (fractionnaire possible)
-    float feedback = 0.7f;     // 0..1
-    float inputLpHz = 8000.0f; // filtre d'entrée 12 dB
-    float loopLpHz = 6000.0f;  // filtre de boucle 6 dB
-    float drive = 0.0f;        // 0..1
-    int curve = 0;             // 0 = Soft, 1 = Asym, 2 = Fold
-    float bbd = 0.0f;          // 0..1 : caractère BBD (bande passante liée à la note + grain)
-    float noise = 0.0f;        // 0..1 : souffle de la ligne BBD (filtré comme le reste)
-    float cross = 0.0f;        // 0..1 : couplage avec l'autre canal
-    float freeze = 0.0f;       // > 0.5 : le looper capture le son et le rejoue
-    float holdSeconds = 0.35f; // longueur de la boucle, en secondes (déjà quantifiée si besoin)
-    float holdMix = 1.0f;      // 0..1 : boucle contre son d'origine
-    float holdPhase = 0.0f;    // 0..1 : tour de boucle, décalage de la lecture (phase du Freeze)
-    float holdSpeedSemis = 0.0f; // petite variation de vitesse de lecture (dérive de la mémoire)
-    float holdHpHz = 20.0f;    // passe-haut 12 dB du looper uniquement (20 Hz = ouvert)
-    float holdLpHz = 20000.0f; // passe-bas 12 dB du looper uniquement (20 kHz = ouvert)
-    float noiseGate = 1.0f;    // porte du souffle : 0 = fermée, 1 = ouverte (pilotée par le niveau d'entrée)
-    float lowCutHz = 80.0f;    // atténuateur de graves « Pultec » dans la boucle : fréquence
-    float lowCutAmt = 0.0f;    // 0 = transparent (SOFT) ... 1 = passe-haut 6 dB (HP)
-    float noiseGain = 1.0f;    // réglage interne : multiplicateur du souffle
-    float jitterGain = 1.0f;   // réglage interne : multiplicateur du jitter d'horloge
-};
-
-// Résonateur : filtre en peigne à feedback positif, accordé par le temps de retard.
-// La sortie humide est prise à la SORTIE DE LA LIGNE BBD (après le souffle et les filtres de boucle) :
-// le BBD colore donc tout le signal humide, et le signal sec revient par Mix.
-//
-// Freeze = looper à un seul lecteur. La sortie brute de la ligne est enregistrée en continu ; au gel,
-// les 4 dernières secondes sont copiées. La boucle est la fin de cette copie, et sa longueur se règle
-// en temps réel (jusqu'à 4 s). Le raccord est traité de deux façons :
-//  - la fin de boucle est choisie par CORRÉLATION : on cherche, sur 25 ms, le point de coupe où la fin
-//    ressemble le plus à ce qui précède le début (la phase des résonances se raccorde) ;
-//  - un fondu enchaîné court (12 ms) relie la fin au début. Tout changement de longueur en temps réel
-//    est lui aussi fondu entre l'ancienne et la nouvelle boucle.
-// La boucle repasse en direct par le filtre de boucle et le BBD, puis se mélange au son d'origine.
-class Resonator
-{
-public:
-    static constexpr float kMaxLoopGain = 1.02f;       // > 1 : auto-oscillation possible
-    static constexpr float kMinFreqHz = 20.0f;
-    static constexpr float kFadeSeconds = 0.012f;      // fondu de raccord
-    static constexpr float kSearchSeconds = 0.025f;    // fenêtre de recherche de la corrélation
-    static constexpr float kLenChangeSeconds = 0.02f;  // intervalle minimal entre deux changements de longueur
-    static constexpr float kReleaseSeconds = 0.5f;     // fondu de sortie du looper (fixe)
-
-    void prepare (float sampleRate, std::uint32_t seed = 1u)
-    {
-        fs = sampleRate;
-        rng = seed * 2654435761u + 12345u;
-        delay.prepare ((int) (fs / kMinFreqHz) + 8);
-        maxDelay = (float) delay.size() - 6.0f;
-        dc.prepare (fs);
-        jitterLp.setCutoff (150.0f, fs);
-        // Normalise le bruit de jitter filtré pour qu'il ait un écart-type d'environ 1
-        const float a = jitterLp.a;
-        jitterNorm = std::sqrt (3.0f * (1.0f + a) / (1.0f - a));
-
-        // Enregistreur continu et copie gelée : mémoire maximale + raccord + recherche
-        fzCap = (int) (fs * (kHoldMaxSeconds + kFadeSeconds + kSearchSeconds + 0.05f));
-        int n = 1;
-        while (n < fzCap) n <<= 1;
-        rec.assign ((size_t) n, 0.0f);
-        recMask = n - 1;
-        fzBuf.assign ((size_t) fzCap, 0.0f);
-        fadeSamples = std::max (8, (int) (kFadeSeconds * fs));
-        searchSamples = (int) (kSearchSeconds * fs);
-        fzSlew = 1.0f - std::exp (-1.0f / (0.03f * fs));
-
-        update (ResonatorParams {});
-        reset();
-    }
-    void reset()
-    {
-        delay.reset(); inLp.reset(); loop.reset(); dc.reset(); bw.reset(); jitterLp.reset(); lastLoop = 0.0f;
-        loopF.reset(); bwF.reset(); hpF.reset(); lpF.reset(); lowF.reset();
-        std::fill (rec.begin(), rec.end(), 0.0f);
-        recW = 0; frozen = false; fzMix = 0.0f; relStep = 0.0f; xfLeft = 0; sinceLenChange = 0;
-    }
-
-    void update (const ResonatorParams& p)
-    {
-        const float fb = std::clamp (p.feedback, 0.0f, 1.0f);
-        const float f0 = 440.0f * std::exp2 ((p.semitones - 69.0f) / 12.0f);
-        loopGain = fb * kMaxLoopGain;
-        inGain = 1.0f - 0.8f * fb;
-        loop.setCutoff (p.loopLpHz, fs);
-        loopF.a = loop.a;
-        inLp.setLowpass (p.inputLpHz, fs);
-
-        // Drive
-        const float dr = std::clamp (p.drive, 0.0f, 1.0f);
-        driveGain = 1.0f + 15.0f * dr;
-        driveComp = 1.0f / std::sqrt (driveGain);
-        driveMix = std::clamp (dr * 10.0f, 0.0f, 1.0f);
-        curve = std::clamp (p.curve, 0, 2);
-
-        // Caractère BBD : bande passante liée à l'horloge (donc à la note), bruit, jitter.
-        // Une ligne de 2R étages bouclée sur une période 1/f0 échantillonne à R*f0 :
-        // moins il y a d'étages (R petit), plus les graves sont sombres.
-        // Le filtre tourne TOUJOURS (état chaud, fréquence continue) et son dosage glisse de 0 à 1
-        // sur les premiers % du réglage : pas de clic au début de la course.
-        const float bbdAmt = std::clamp (p.bbd, 0.0f, 1.0f);
-        const float R = 770.0f * std::exp2 (-5.5f * bbdAmt);
-        const float bwHz = std::min (0.2f * R * f0, 0.45f * fs);
-        bwMix = std::clamp (bbdAmt * 20.0f, 0.0f, 1.0f);
-        bw.setLowpass (bwHz, fs);
-        // Mêmes coefficients pour le chemin gelé ; son ÉTAT (z1, z2) ne doit JAMAIS être touché ici :
-        // update() est appelé toutes les 16 échantillons et l'effacer ferait un saut à chaque appel.
-        bwF.b0 = bw.b0; bwF.b1 = bw.b1; bwF.b2 = bw.b2; bwF.a1 = bw.a1; bwF.a2 = bw.a2;
-        const float w = 2.0f * kPi * f0 / fs;
-        float pd = loop.phaseDelay (f0, fs);
-        {
-            const std::complex<float> h = (1.0f - bwMix) + bwMix * bw.response (f0, fs);
-            pd += -std::arg (h) / w;
-        }
-        // Atténuateur de graves « Pultec » dans la boucle : sortie = v - amt * LP(v).
-        // amt = 1 : passe-haut 6 dB. amt < 1 : plateau d'atténuation des graves, de plus en plus doux
-        // (gain en continu = 1 - amt). Il tourne toujours (état chaud) : à 0 il est exactement transparent.
-        // Phase compensée comme les autres filtres de la boucle : l'accord ne bouge pas.
-        lowF.setCutoff (p.lowCutHz, fs);
-        lowAmt = std::clamp (p.lowCutAmt, 0.0f, 1.0f);
-        {
-            const std::complex<float> lp1 = (1.0f - lowF.a) / (1.0f - lowF.a * std::polar (1.0f, -w));
-            pd += -std::arg (1.0f - lowAmt * lp1) / w;
-        }
-        const float nz = std::clamp (p.noise, 0.0f, 1.0f);
-        noiseAmp = 0.0025f * nz * nz * p.noiseGain * std::clamp (p.noiseGate, 0.0f, 1.0f);      // souffle injecté dans la ligne BBD
-        jitterAmt = 0.00025f * bbdAmt * p.jitterGain;    // grain d'horloge
-
-        // Couplage entre canaux : le chemin croisé a un échantillon de retard en plus, on le compense
-        crossAmt = std::clamp (p.cross, 0.0f, 1.0f);
-        if (crossAmt > 0.0f)
-        {
-            const std::complex<float> m = std::complex<float> (1.0f - crossAmt, 0.0f) + crossAmt * std::polar (1.0f, -w);
-            pd += -std::arg (m) / w;
-        }
-
-        // Les filtres de la boucle retardent la phase : on les compense pour rester juste
-        delaySamples = std::clamp (fs / f0 - pd, 2.0f, maxDelay);
-
-        // Looper
-        // Filtres du looper : deux filtres 12 dB indépendants (passe-haut puis passe-bas). Ils tournent toujours
-        // (coefficients seulement : l'état n'est jamais touché ici) ; leur dosage va de 0 (ouvert) à 1 sur la
-        // première octave, donc aucune coloration ni clic quand ils sont ouverts.
-        const float hpHz = std::clamp (p.holdHpHz, 20.0f, 20000.0f), lpHz = std::clamp (p.holdLpHz, 20.0f, 20000.0f);
-        hpAmt = std::clamp (std::log2 (hpHz / 20.0f), 0.0f, 1.0f);
-        lpAmt = std::clamp (std::log2 (20000.0f / lpHz), 0.0f, 1.0f);
-        hpF.setHighpass (hpHz, fs);
-        lpF.setLowpass (lpHz, fs);
-
-        holdMix = std::clamp (p.holdMix, 0.0f, 1.0f);
-        holdPhase = std::clamp (p.holdPhase, 0.0f, 1.0f);
-        loopSpeed = std::exp2 (std::clamp (p.holdSpeedSemis, -2.0f, 2.0f) / 12.0f);
-        targetLen = (int) std::lround (std::clamp (p.holdSeconds, kHoldMinSeconds, kHoldMaxSeconds) * fs);
-        const bool wantFrozen = p.freeze > 0.5f;
-        if (wantFrozen && ! frozen)
-            captureLoop();
-        else if (! wantFrozen)
-        {
-            if (frozen) relStep = std::max (fzMix, 1.0e-3f) / (kReleaseSeconds * fs);   // release de 0,5 s, linéaire
-            frozen = false;
-        }
-        else if (sinceLenChange >= (int) (kLenChangeSeconds * fs)
-                 && std::abs (targetLen - cur.L) > std::max (8, cur.L / 100))
-        {
-            applyLength (targetLen, true);          // longueur modifiée en temps réel
-            sinceLenChange = 0;
-        }
-
-        // Phase du Freeze : la lecture se décale d'un tour de boucle au plus. Chaque déplacement est un fondu de 12 ms,
-        // au plus un toutes les 20 ms : tourner le potard ne fait jamais de clic.
-        if (frozen && xfLeft == 0 && sincePhaseMove >= (int) (kLenChangeSeconds * fs))
-        {
-            float d = holdPhase - phaseApplied;
-            d -= std::round (d);   // la phase est circulaire : chemin le plus court
-            if (std::fabs (d) * (float) cur.L >= 24.0f) movePhase (d);
-        }
-    }
-
-    // crossV : sortie de boucle de l'autre canal (ignorée si cross = 0)
-    float process (float x, float crossV = 0.0f)
-    {
-        // Drive (courbe choisie), puis filtre d'entrée, blocage du continu et gain
-        float s = x;
-        if (driveMix > 0.0f)
-            s = x + (shape (x * driveGain) * driveComp - x) * driveMix;
-        const float in = dc.process (inLp.process (s)) * inGain;
-
-        // Jitter d'horloge : petites variations aléatoires du temps de retard
-        float d = delaySamples;
-        if (jitterAmt > 0.0f)
-            d = std::clamp (d * (1.0f + jitterAmt * jitterLp.process (nextNoise()) * jitterNorm), 2.0f, maxDelay);
-
-        // Sortie de la ligne BBD : le souffle y est ajouté, puis tout passe par les filtres de boucle
-        float raw = delay.read (d);
-        if (noiseAmp > 0.0f)
-            raw += noiseAmp * nextNoise();
-        rec[(size_t) recW] = raw;                 // enregistrement continu pour le looper
-        recW = (recW + 1) & recMask;
-
-        float v = loop.process (raw);
-        v += (bw.process (v) - v) * bwMix;
-        v -= lowAmt * lowF.process (v);          // atténuateur de graves de la boucle
-        lastLoop = v;
-        const float vm = (1.0f - crossAmt) * v + crossAmt * crossV;
-        const float y = in + std::tanh (loopGain * vm);  // saturation douce dans la boucle
-        delay.push (y);
-
-        // Sortie humide = sortie de la ligne (v), mélangée à la boucle qui repasse par les mêmes filtres
-        float out = v;
-        lastPre = 0.0f;
-        if (frozen || fzMix > 0.0f)
-        {
-            float vf = loopF.process (loopSample());
-            vf += (bwF.process (vf) - vf) * bwMix;
-            lastPre = vf;   // la boucle telle qu'on l'entend, avant les filtres HP / LP du Hold (pour les mémoires)
-            vf += (hpF.process (vf) - vf) * hpAmt;
-            vf += (lpF.process (vf) - vf) * lpAmt;
-            out += (vf - v) * fzMix;
-            if (frozen)
-                fzMix += (holdMix - fzMix) * fzSlew;                // entrée rapide (30 ms)
-            else
-            {
-                fzMix -= relStep;                                    // sortie : rampe linéaire de 0,5 s
-                if (fzMix < 1.0e-4f) fzMix = 0.0f;
-            }
-            ++sinceLenChange;
-            ++sincePhaseMove;
-        }
-        return out;
-    }
-    float loopOut() const { return lastLoop; }
-    int loopLength() const { return cur.L; }   // longueur de la boucle en cours (échantillons)
-    bool isFrozen() const { return frozen; }
-    float loopPreOut() const { return lastPre; }   // sortie de la boucle avant les filtres du Hold (0 hors Freeze)
-
-private:
-    // Une « tête » de lecture : position p dans la fenêtre [S, E), longueur L, fondu de raccord X
-    struct Head { float p = 0.0f; int S = 0, E = 0, L = 1, X = 1; };
-
-    // Interpolation cubique (Hermite) dans la copie gelée
-    float frozenAt (float x) const
-    {
-        const int i0 = (int) x;
-        const float f = x - (float) i0;
-        const int hi = fzCap - 1;
-        const float ym1 = fzBuf[(size_t) std::clamp (i0 - 1, 0, hi)], y0 = fzBuf[(size_t) std::clamp (i0, 0, hi)];
-        const float y1 = fzBuf[(size_t) std::clamp (i0 + 1, 0, hi)], y2 = fzBuf[(size_t) std::clamp (i0 + 2, 0, hi)];
-        const float c1 = 0.5f * (y1 - ym1);
-        const float c2 = ym1 - 2.5f * y0 + 2.0f * y1 - 0.5f * y2;
-        const float c3 = 0.5f * (y2 - ym1) + 1.5f * (y0 - y1);
-        return ((c3 * f + c2) * f + c1) * f + y0;
-    }
-
-    // Dans les X derniers échantillons de la boucle, on fond vers ce qui PRÉCÈDE le début
-    float readHead (const Head& h) const
-    {
-        float smp = frozenAt (h.p);
-        const float zone = (float) (h.E - h.X);
-        if (h.p >= zone)
-        {
-            const float wgt = (h.p - zone) / (float) h.X;
-            smp = smp * (1.0f - wgt) + frozenAt (h.p - (float) h.L) * wgt;
-        }
-        return smp;
-    }
-    void advance (Head& h) const
-    {
-        h.p += loopSpeed;
-        if (h.p >= (float) h.E) h.p -= (float) h.L;
-    }
-
-    float loopSample()
-    {
-        float smp = readHead (cur);
-        advance (cur);
-        if (xfLeft > 0)   // fondu entre l'ancienne et la nouvelle boucle
-        {
-            const float old = readHead (prevH);
-            advance (prevH);
-            const float wgt = 1.0f - (float) xfLeft / (float) xfLen;
-            smp = old * (1.0f - wgt) + smp * wgt;
-            --xfLeft;
-        }
-        return smp;
-    }
-
-    // Corrélation : décalage dl (en échantillons) de la fin de boucle, entre 0 et 25 ms, qui maximise la
-    // ressemblance entre la fin de boucle et ce qui précède son début. Mesure décimée (coût constant).
-    int bestDelta (int len, int fade) const
-    {
-        const int dmax = std::min (searchSamples, fzCap - len - fade - 2);
-        if (dmax <= 0) return 0;
-        const int stride = std::max (1, (int) (fs / 12000.0f)), step = std::max (1, (int) (fs / 24000.0f));
-        double best = -2.0; int bd = 0;
-        for (int dl = 0; dl <= dmax; dl += step)
-        {
-            const int e = fzCap - dl;
-            double sab = 0.0, saa = 0.0, sbb = 0.0;
-            for (int i = 0; i < fade; i += stride)
-            {
-                const double a = (double) fzBuf[(size_t) (e - fade + i)], b = (double) fzBuf[(size_t) (e - len - fade + i)];
-                sab += a * b; saa += a * a; sbb += b * b;
-            }
-            const double score = sab / std::sqrt (saa * sbb + 1.0e-20);
-            if (score > best) { best = score; bd = dl; }
-        }
-        return bd;
-    }
-
-    // Nouvelle longueur de boucle (fin choisie par corrélation). Si la tête est hors de la nouvelle
-    // fenêtre, elle est ramenée dedans ; avec fondu, l'ancienne boucle s'éteint pendant la nouvelle.
-    void applyLength (int newLen, bool withFade)
-    {
-        const int maxLen = fzCap - fadeSamples - searchSamples - 2;
-        newLen = std::clamp (newLen, 64, maxLen);
-        Head nh;
-        nh.L = newLen;
-        nh.X = std::max (8, std::min (fadeSamples, newLen / 3));
-        nh.E = fzCap - bestDelta (newLen, nh.X);
-        nh.S = nh.E - newLen;
-        float pos = cur.p;
-        if (pos < (float) nh.S || pos >= (float) nh.E)
-        {
-            float q = std::fmod (pos - (float) nh.S, (float) newLen);
-            if (q < 0.0f) q += (float) newLen;
-            pos = (float) nh.S + q;
-        }
-        nh.p = pos;
-        if (withFade) { prevH = cur; xfLen = fadeSamples; xfLeft = xfLen; }
-        cur = nh;
-    }
-
-    // Décale la lecture de d tours de boucle, avec un fondu entre l'ancienne et la nouvelle position
-    void movePhase (float d)
-    {
-        prevH = cur;
-        xfLen = fadeSamples;
-        xfLeft = xfLen;
-        cur.p += d * (float) cur.L;
-        while (cur.p >= (float) cur.E) cur.p -= (float) cur.L;
-        while (cur.p < (float) cur.S) cur.p += (float) cur.L;
-        phaseApplied += d;
-        sincePhaseMove = 0;
-    }
-
-    // Capture : copie des dernières secondes, puis boucle de la longueur demandée, lue depuis son début
-    void captureLoop()
-    {
-        for (int n = 0; n < fzCap; ++n)
-            fzBuf[(size_t) n] = rec[(size_t) ((recW - fzCap + n) & recMask)];
-        cur = Head {};
-        applyLength (targetLen, false);
-        cur.p = (float) cur.S + holdPhase * (float) cur.L;   // la phase réglée avant le gel est respectée
-        phaseApplied = holdPhase;
-        sincePhaseMove = 0;
-        xfLeft = 0;
-        loopF.reset(); bwF.reset(); hpF.reset(); lpF.reset();
-        sinceLenChange = 0;
-        frozen = true;
-    }
-
-    float shape (float x) const
-    {
-        switch (curve)
-        {
-            case 1:  return std::tanh (x + 0.4f) - 0.37994896f;  // asymétrique (tanh(0.4))
-            case 2:  return std::sin (x);                          // repli d'onde
-            default: return std::tanh (x);                         // douce
-        }
-    }
-    float nextNoise()
-    {
-        rng ^= rng << 13; rng ^= rng >> 17; rng ^= rng << 5;
-        return (float) (std::int32_t) rng * (1.0f / 2147483648.0f);
-    }
-
-    float fs = 48000.0f, maxDelay = 1000.0f, delaySamples = 100.0f;
-    float loopGain = 0.0f, inGain = 1.0f, crossAmt = 0.0f, lastLoop = 0.0f, bwMix = 0.0f;
-    float driveGain = 1.0f, driveComp = 1.0f, driveMix = 0.0f;
-    int curve = 0;
-    float noiseAmp = 0.0f, jitterAmt = 0.0f, jitterNorm = 1.0f;
-    std::uint32_t rng = 1u;
-    DelayLine delay;
-    Biquad inLp, bw, bwF, hpF, lpF;
-    OnePole loop, loopF, jitterLp, lowF;
-    DcBlocker dc;
-
-    // Looper
-    std::vector<float> rec, fzBuf;
-    int recMask = 0, recW = 0, fzCap = 0, fadeSamples = 8, searchSamples = 0;
-    bool frozen = false;
-    float fzMix = 0.0f, fzSlew = 0.001f, holdMix = 1.0f, loopSpeed = 1.0f, relStep = 0.0f, hpAmt = 0.0f, lpAmt = 0.0f, lowAmt = 0.0f;
-    int targetLen = 16000, sinceLenChange = 0, xfLeft = 0, xfLen = 1, sincePhaseMove = 0;
-    float holdPhase = 0.0f, phaseApplied = 0.0f, lastPre = 0.0f;
-    Head cur, prevH;
-};
-} // namespace bbdres
+// Input
+inline constexpr const char* drive      = "drive";       // 0..1
+inline constexpr const char* driveCurve = "driveCurve";  // 0 Soft, 1 Asym, 2 Fold
+inline constexpr const char* inputLP    = "inputLP";     // filtre d'entrée 12 dB, Hz
+// Resonator
+inline constexpr const char* tune       = "tune";        // note MIDI (C3 = 60)
+inline constexpr const char* fine       = "fine";        // accord fin, en cents
+inline constexpr const char* feedback   = "feedback";    // 0..1
+inline constexpr const char* loopLP     = "loopLP";      // filtre de boucle 6 dB, Hz
+inline constexpr const char* lowCut     = "lowCut";      // atténuateur de graves de la boucle : fréquence (20..600 Hz)
+inline constexpr const char* pultec     = "pultec";      // 0 = SOFT (transparent) ... 1 = HP 6 dB
+inline constexpr const char* loopDyn    = "loopDyn";     // -1..+1 : l'entrée ouvre/ferme le filtre de boucle
+inline constexpr const char* bbd        = "bbd";         // caractère BBD 0..1 (bande passante + grain)
+inline constexpr const char* noise      = "noise";       // souffle 0..1
+inline constexpr const char* freeze     = "freeze";      // fige le son (hold)
+inline constexpr const char* holdLen    = "holdLen";     // longueur de la boucle du looper, de 30 ms à 4 s
+inline constexpr const char* holdQuant  = "holdQuant";   // longueur calée sur le tempo (divisions rythmiques)
+inline constexpr const char* holdPhase  = "holdPhase";   // phase du Freeze : décalage de la lecture de la boucle, 0..1 tour
+inline constexpr const char* holdMix    = "holdMix";     // boucle contre son d'origine, 0..1
+inline constexpr const char* holdHP     = "holdHP";      // passe-haut 12 dB du looper uniquement (20 Hz = ouvert)
+inline constexpr const char* holdLP     = "holdLP";      // passe-bas 12 dB du looper uniquement (20 kHz = ouvert)
+// Pitch
+inline constexpr const char* root       = "root";        // tonique 0..11
+inline constexpr const char* scale      = "scale";       // index dans kScales
+inline constexpr const char* quantize   = "quantize";    // Tune calé sur la gamme
+// Mod
+inline constexpr const char* lfoShape   = "lfoShape";    // 0..5
+inline constexpr const char* lfoSync    = "lfoSync";     // 0 = libre, sinon division du tempo
+inline constexpr const char* lfoRate    = "lfoRate";     // Hz (mode libre)
+inline constexpr const char* lfoPhase   = "lfoPhase";    // décalage de phase, 0..1 cycle (mode sync)
+inline constexpr const char* lfoDepth   = "lfoDepth";    // 0..1
+inline constexpr const char* lfoTarget  = "lfoTarget";   // 0 Tune, 1 Feedback, 2 Filter
+inline constexpr const char* drift      = "drift";       // 0..1
+// Stereo
+inline constexpr const char* spread     = "spread";      // désaccord gauche/droite 0..1
+inline constexpr const char* cross      = "cross";       // couplage gauche/droite 0..1
+// Sequencer
+inline constexpr const char* seqOn     = "seqOn";      // séquenceur de pitch actif
+inline constexpr const char* seqLength = "seqLength";  // nombre de pas, 1..16
+inline constexpr const char* seqStep   = "seqStep";    // durée d'un pas (index dans kSeqSteps)
+inline constexpr const char* seqQuant  = "seqQuant";   // hauteurs des pas calées sur la gamme générale
+inline constexpr const char* seqGlide  = "seqGlide";   // glissando entre pas, fraction de la durée du pas
+inline constexpr const char* kStepIDs[16]   = { "step1", "step2", "step3", "step4", "step5", "step6", "step7", "step8",
+                                                "step9", "step10", "step11", "step12", "step13", "step14", "step15", "step16" };
+inline constexpr const char* kStepOnIDs[16] = { "stepOn1", "stepOn2", "stepOn3", "stepOn4", "stepOn5", "stepOn6", "stepOn7", "stepOn8",
+                                                "stepOn9", "stepOn10", "stepOn11", "stepOn12", "stepOn13", "stepOn14", "stepOn15", "stepOn16" };
+// Résonateurs : 4 voix en parallèle (allumée, intervalle par rapport à Tune, niveau, balance, solo)
+inline constexpr const char* kVoiceOnIDs[4]   = { "r1On", "r2On", "r3On", "r4On" };
+inline constexpr const char* kVoiceIntIDs[4]  = { "r1Int", "r2Int", "r3Int", "r4Int" };
+inline constexpr const char* kVoiceLvlIDs[4]  = { "r1Lvl", "r2Lvl", "r3Lvl", "r4Lvl" };
+inline constexpr const char* kVoicePanIDs[4]  = { "r1Pan", "r2Pan", "r3Pan", "r4Pan" };
+inline constexpr const char* kVoiceSoloIDs[4] = { "r1Solo", "r2Solo", "r3Solo", "r4Solo" };
+// Global (jamais modifié par un preset)
+inline constexpr const char* presetFade = "presetFade";  // durée du fondu entre presets généraux et entre A et B, 0..5 s
+// Output
+inline constexpr const char* mix        = "mix";         // dry/wet 0..1
+inline constexpr const char* outLevel   = "outLevel";    // niveau de sortie, dB
+}
