@@ -48,6 +48,8 @@ BBDResAudioProcessor::BBDResAudioProcessor()
         uiPitchVoice[v].store (-1.0f);
     }
     holdPhaseP = apvts.getRawParameterValue (ParamIDs::holdPhase);
+    bounceThread.work = [this] { processBounceJob(); };
+    bounceThread.startThread();
     for (int i = 0; i < bbdres::kNumFreezeSlots; ++i)
         uiSlotState[i].store (0);
     for (int i = 0; i < kCqtRing; ++i)
@@ -435,7 +437,6 @@ void BBDResAudioProcessor::prepareToPlay (double sampleRate, int)
     noiseGate.prepare (controlRate);
     holdPhaseSm.prepare (controlRate, 0.03f);   // la phase du Freeze est lissée : les déplacements du potard restent réguliers
     freezeBank.prepare (fs);   // (ré)alloue les mémoires de boucles, en conservant leur contenu
-    recorder.prepare (fs);
     for (auto& pl : players) pl.prepare (fs);
     activePlayer = 0;
 
@@ -520,42 +521,64 @@ void BBDResAudioProcessor::processBlock (juce::AudioBuffer<float>& buffer, juce:
     constexpr float kMinLoopLog2 = 6.64385619f;   // log2 (100 Hz)
     constexpr float kMaxLoopLog2 = 14.2877124f;   // log2 (20000 Hz)
 
-    // Mémoires de boucles Freeze : commandes venues de l'interface (enregistrer, rappeler, arrêter)
+    // Mémoires de boucles Freeze : commandes venues de l'interface
+    //  0 enregistrer (mémoire vide) : la boucle gelée est exportée EXACTEMENT comme elle joue (même fenêtre, même point
+    //    de boucle, même longueur), la phase et la longueur réglées ensuite n'y changent rien ;
+    //  1 rappeler / arrêter ; 2 tout arrêter ; 3 effacer (la mémoire redevient vide).
     {
-        bool anyFrozen = false;
-        int loopLen = 0;
-        for (int v = 0; v < bbdres::kNumVoices; ++v)
-            if (voiceWasActive[v] && resonators[v][0].isFrozen())
-            {
-                anyFrozen = true;
-                if (loopLen == 0) loopLen = resonators[v][0].loopLength();
-            }
-        if (recorder.active() && ! anyFrozen) recorder.abort();   // le Freeze s'est arrêté : l'enregistrement est abandonné
-
         const int cmd = slotCommand.exchange (-1, std::memory_order_acq_rel);
         const int type = cmd >= 0 ? cmd / 8 : -1, idx = cmd >= 0 ? cmd % 8 : -1;
-        if (type == 0 && idx < bbdres::kNumFreezeSlots && anyFrozen && ! recorder.active())
+        if (type == 2)
+            for (auto& pl : players) pl.stop();
+        else if (idx >= 0 && idx < bbdres::kNumFreezeSlots)
         {
-            for (auto& pl : players)   // on n'écrase pas une mémoire pendant qu'elle joue
-                if (pl.slot() == idx) pl.stopNow();
-            recorder.start (idx, loopLen, (int) (bbdres::Resonator::kFadeSeconds * (float) currentSampleRate));
-        }
-        else if (type == 1 && idx < bbdres::kNumFreezeSlots)
-        {
-            auto& cur = players[activePlayer];
-            if (cur.isPlaying() && cur.slot() == idx)
-                cur.stop();                                    // un nouveau clic sur la boucle qui joue l'arrête
-            else if (freezeBank.used (idx))
+            if (type == 0 && ! freezeBank.used (idx) && ! bounceJob.pending.load (std::memory_order_acquire))
             {
-                const int other = 1 - activePlayer;            // fondu : l'ancien s'éteint, le nouveau entre
-                cur.stop();
-                players[other].start (freezeBank.leftData (idx), freezeBank.rightData (idx), freezeBank.total (idx),
-                                      freezeBank.preroll (idx), idx, t.holdPhase);
-                activePlayer = other;
+                int voicesFrozen = 0;
+                const int c1 = numCh > 1 ? 1 : 0;
+                for (int v = 0; v < bbdres::kNumVoices; ++v)
+                {
+                    auto& jv = bounceJob.v[v];
+                    jv.used = false;
+                    if (! voiceWasActive[v]) continue;
+                    if (resonators[v][0].exportLoop (jv.ex[0]) && resonators[v][c1].exportLoop (jv.ex[1]))
+                    {
+                        const auto pg = bbdres::panGains (voicePanSm[v].y);
+                        const float g = voiceGainSm[v].y;
+                        jv.gl = numCh > 1 ? g * pg.l : g;
+                        jv.gr = numCh > 1 ? g * pg.r : g;
+                        jv.used = true;
+                        ++voicesFrozen;
+                    }
+                }
+                if (voicesFrozen > 0)
+                {
+                    bounceJob.slot = idx;
+                    bounceJob.fs = (float) currentSampleRate;
+                    bounceJob.pending.store (true, std::memory_order_release);   // le rendu se fait sur un fil à part
+                }
+            }
+            else if (type == 1)
+            {
+                auto& cur = players[activePlayer];
+                if (cur.isPlaying() && cur.slot() == idx)
+                    cur.stop();                                    // un nouveau clic sur la boucle qui joue l'arrête
+                else if (freezeBank.used (idx))
+                {
+                    const int other = 1 - activePlayer;            // fondu : l'ancien s'éteint, le nouveau entre
+                    cur.stop();
+                    players[other].start (freezeBank.leftData (idx), freezeBank.rightData (idx), freezeBank.total (idx),
+                                          freezeBank.preroll (idx), idx, 0.0f);   // toujours depuis le point de boucle : ni phase ni longueur
+                    activePlayer = other;
+                }
+            }
+            else if (type == 3)
+            {
+                for (auto& pl : players)
+                    if (pl.slot() == idx) pl.stopNow();
+                freezeBank.clear (idx);
             }
         }
-        else if (type == 2)
-            for (auto& pl : players) pl.stop();
     }
 
     // Le contenu de la séquence a changé (mémoire ou preset rappelé, pas modifié, SEQ activé) : la hauteur glisse
@@ -676,7 +699,7 @@ void BBDResAudioProcessor::processBlock (juce::AudioBuffer<float>& buffer, juce:
         rp.noiseGate = noiseGateGain;
         rp.freeze    = t.freeze ? 1.0f : 0.0f;   // front montant = fige le son
         rp.holdPhase = holdPhaseSm.next (t.holdPhase);
-        for (auto& pl : players) { pl.setPhase (rp.holdPhase); pl.setFilters (rp.holdHpHz, rp.holdLpHz); }
+        for (auto& pl : players) pl.setFilters (rp.holdHpHz, rp.holdLpHz);   // les filtres du Hold agissent sur les mémoires ; ni phase ni longueur
         const float crossAmt = crossSm.next (t.cross);
         rp.cross     = numCh > 1 ? crossAmt : 0.0f;
         const float mixNew = mixSm.next (t.mix);
@@ -731,7 +754,7 @@ void BBDResAudioProcessor::processBlock (juce::AudioBuffer<float>& buffer, juce:
             const float l = levelPrev + (lvlNew - levelPrev) * k;
 
             // Somme des voix : chacune reçoit le même signal d'entrée
-            float wetSum[2] = { 0.0f, 0.0f }, preSum[2] = { 0.0f, 0.0f };
+            float wetSum[2] = { 0.0f, 0.0f };
             for (int v = 0; v < bbdres::kNumVoices; ++v)
             {
                 if (! voiceActive[v]) continue;
@@ -741,13 +764,8 @@ void BBDResAudioProcessor::processBlock (juce::AudioBuffer<float>& buffer, juce:
                 {
                     const float gain = c == 0 ? voiceGainL[v] : voiceGainR[v];
                     wetSum[c] += gain * resonators[v][c].process (data[c][start + i], crossIn[c]);
-                    preSum[c] += gain * resonators[v][c].loopPreOut();   // la boucle gelée, avant les filtres du Hold
                 }
             }
-
-            // Enregistrement d'une mémoire : un tour complet de la boucle gelée, stéréo, pendant qu'elle tourne
-            if (recorder.active() && recorder.push (preSum[0], numCh > 1 ? preSum[1] : preSum[0]))
-                freezeBank.commit (recorder.slotIndex(), recorder.left(), recorder.right(), recorder.length(), recorder.preroll());
 
             // Lecture des mémoires : la boucle rappelée remplace peu à peu le son wet (Hold Mix règle la part)
             if (players[0].active() || players[1].active())
@@ -791,7 +809,7 @@ void BBDResAudioProcessor::updateSlotStates()
     for (int i = 0; i < bbdres::kNumFreezeSlots; ++i)
     {
         int s = freezeBank.used (i) ? 1 : 0;
-        if (recorder.active() && recorder.slotIndex() == i) s = 2;
+        if (bounceJob.pending.load (std::memory_order_relaxed) && bounceJob.slot == i) s = 2;   // mise en mémoire en cours
         else if ((players[0].active() && players[0].slot() == i) || (players[1].active() && players[1].slot() == i)) s = 3;
         uiSlotState[i].store (s, std::memory_order_relaxed);
     }
@@ -865,4 +883,33 @@ void BBDResAudioProcessor::setStateInformation (const void* data, int sizeInByte
 juce::AudioProcessor* JUCE_CALLTYPE createPluginFilter()
 {
     return new BBDResAudioProcessor();
+}
+
+// Fil à part : rend la boucle gelée décrite par le fil audio, puis la range dans la mémoire demandée.
+// Les voix actives sont mélangées avec leur niveau et leur panoramique du moment, avant les filtres du Hold.
+void BBDResAudioProcessor::processBounceJob()
+{
+    if (! bounceJob.pending.load (std::memory_order_acquire)) return;
+    std::vector<float> accL, accR;
+    int length = 0, fade = 0;
+    bool ok = true;
+    for (int v = 0; v < bbdres::kNumVoices && ok; ++v)
+    {
+        const auto& jv = bounceJob.v[v];
+        if (! jv.used) continue;
+        if (length == 0)
+        {
+            length = jv.ex[0].L;
+            fade = jv.ex[0].X;
+            accL.assign ((size_t) length, 0.0f);
+            accR.assign ((size_t) length, 0.0f);
+        }
+        if (jv.ex[0].L != length || jv.ex[1].L != length) { ok = false; break; }
+        bbdres::renderLoopCycle (jv.ex[0], jv.gl, accL);
+        bbdres::renderLoopCycle (jv.ex[1], jv.gr, accR);
+        if (! jv.ex[0].stillValid() || ! jv.ex[1].stillValid()) ok = false;   // le Freeze a été refait pendant le rendu
+    }
+    if (ok && length > 0 && freezeBank.isPrepared() && ! freezeBank.used (bounceJob.slot))
+        freezeBank.load (bounceJob.slot, bbdres::makeSlotBuffer (accL, fade), bbdres::makeSlotBuffer (accR, fade), bounceJob.fs, fade);
+    bounceJob.pending.store (false, std::memory_order_release);
 }
