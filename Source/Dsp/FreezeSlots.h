@@ -126,6 +126,15 @@ public:
         }
     }
 
+    // Fil audio : efface une mémoire (elle redevient vide)
+    void clear (int i)
+    {
+        auto& s = slots[(size_t) i];
+        s.ready.store (false, std::memory_order_release);
+        s.total.store (0, std::memory_order_release);
+        s.version.fetch_add (2, std::memory_order_acq_rel);
+    }
+
     // Fil audio : fin d'un enregistrement (copie sans allocation)
     void commit (int i, const float* l, const float* r, int n, int preroll)
     {
