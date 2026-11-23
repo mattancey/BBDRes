@@ -41,6 +41,7 @@ target_sources(BBDResV2 PRIVATE
     Source/Dsp/Cqt.h
     Source/Dsp/FreezeSlots.h
     Source/Dsp/LoopPlayer.h
+    Source/Dsp/LoopRender.h
     Source/UI/FreezeSlots.h
     Source/Quotes.h
     Source/UI/QuoteView.h
