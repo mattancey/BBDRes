@@ -4,6 +4,7 @@
 // pour pouvoir être testé séparément du plug-in.
 
 #include <algorithm>
+#include <atomic>
 #include <cmath>
 #include <complex>
 #include <cstdint>
@@ -149,6 +150,20 @@ private:
     float at (int k) const { return buf[(size_t) ((w - k) & mask)]; }
     std::vector<float> buf;
     int mask = 0, w = 0;
+};
+
+// Description de la boucle gelée en cours, pour la mémoriser : le contenu (partagé, en lecture seule), la fenêtre de
+// boucle (début S, fin E, longueur L, fondu X) et les filtres qui s'y appliquent. Le rendu se fait hors temps réel.
+struct LoopExport
+{
+    const float* buf = nullptr;
+    int cap = 0, S = 0, E = 0, L = 0, X = 0;
+    float loopA = 0.0f;                                        // passe-bas de boucle (6 dB) : coefficient
+    float b0 = 1.0f, b1 = 0.0f, b2 = 0.0f, a1 = 0.0f, a2 = 0.0f, bwMix = 0.0f;   // filtre BBD et son dosage
+    const std::atomic<unsigned>* serialPtr = nullptr;
+    unsigned serial = 0;
+    // faux si le gel a été refait pendant le rendu (le contenu a été remplacé)
+    bool stillValid() const { return serialPtr != nullptr && serialPtr->load (std::memory_order_acquire) == serial; }
 };
 
 // Réglages d'un résonateur (valeurs déjà lissées)
@@ -388,6 +403,19 @@ public:
     float loopOut() const { return lastLoop; }
     int loopLength() const { return cur.L; }   // longueur de la boucle en cours (échantillons)
     bool isFrozen() const { return frozen; }
+    // Exporte la boucle exactement telle qu'elle joue (même fenêtre, même longueur) ; faux si elle n'est pas gelée ou en cours de capture
+    bool exportLoop (LoopExport& e) const
+    {
+        const unsigned s = captureSerial.load (std::memory_order_acquire);
+        if (! frozen || (s & 1u) != 0u || cur.L < 16 || fzBuf.empty()) return false;
+        e.buf = fzBuf.data(); e.cap = fzCap;
+        e.S = cur.S; e.E = cur.E; e.L = cur.L; e.X = cur.X;
+        e.loopA = loopF.a;
+        e.b0 = bwF.b0; e.b1 = bwF.b1; e.b2 = bwF.b2; e.a1 = bwF.a1; e.a2 = bwF.a2; e.bwMix = bwMix;
+        e.serialPtr = &captureSerial;
+        e.serial = s;
+        return true;
+    }
     float loopPreOut() const { return lastPre; }   // sortie de la boucle avant les filtres du Hold (0 hors Freeze)
 
 private:
@@ -503,8 +531,10 @@ private:
     // Capture : copie des dernières secondes, puis boucle de la longueur demandée, lue depuis son début
     void captureLoop()
     {
+        captureSerial.fetch_add (1, std::memory_order_acq_rel);   // impair : copie en cours
         for (int n = 0; n < fzCap; ++n)
             fzBuf[(size_t) n] = rec[(size_t) ((recW - fzCap + n) & recMask)];
+        captureSerial.fetch_add (1, std::memory_order_acq_rel);   // pair : contenu stable
         cur = Head {};
         applyLength (targetLen, false);
         cur.p = (float) cur.S + holdPhase * (float) cur.L;   // la phase réglée avant le gel est respectée
@@ -549,6 +579,7 @@ private:
     float fzMix = 0.0f, fzSlew = 0.001f, holdMix = 1.0f, loopSpeed = 1.0f, relStep = 0.0f, hpAmt = 0.0f, lpAmt = 0.0f, lowAmt = 0.0f;
     int targetLen = 16000, sinceLenChange = 0, xfLeft = 0, xfLen = 1, sincePhaseMove = 0;
     float holdPhase = 0.0f, phaseApplied = 0.0f, lastPre = 0.0f;
+    std::atomic<unsigned> captureSerial { 0 };
     Head cur, prevH;
 };
 } // namespace bbdres
