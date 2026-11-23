@@ -9,10 +9,11 @@
 namespace bbdui
 {
 // Quatre mémoires de boucles Freeze, en boutons (sous FREEZE). Chaque bouton plein montre la forme d'onde de sa boucle.
-//  - clic long (0,5 s), pendant que Freeze tourne : enregistre la boucle gelée en cours. Le bouton scintille pendant
-//    l'enregistrement (un tour de boucle) puis une dernière fois quand c'est fini ;
-//  - clic court : rappelle la boucle (fondu vers elle ; Hold Mix règle la part de boucle) ; un nouveau clic dessus l'arrête
-//    (sortie en 0,5 s) ;
+//  - clic sur un bouton VIDE, pendant que Freeze tourne : mémorise la boucle exactement comme elle joue à cet instant
+//    (même point de boucle, même longueur). Le bouton scintille une fois quand c'est fait ; sans Freeze, contour rouge ;
+//  - clic sur un bouton PLEIN (jaune) : rappelle la boucle (fondu vers elle ; Hold Mix règle la part de boucle) ; un nouveau
+//    clic dessus l'arrête (sortie en 0,5 s). Phase et Length n'agissent pas sur une mémoire ; les filtres du Hold, si ;
+//  - clic long (0,5 s) sur un bouton plein : l'efface, il redevient vide ;
 //  - bouton plein = une boucle y est mémorisée, bouton creux = vide ; contour clair = en lecture.
 // Les boucles sont sauvées avec le projet Live, jamais avec les presets du plug-in.
 class FreezeSlotButtons : public juce::Component, private juce::Timer
@@ -71,8 +72,15 @@ public:
 
     void mouseUp (const juce::MouseEvent&) override
     {
-        if (pressed >= 0 && ! longFired && lastState[pressed] >= 1)   // clic court : rappel (ou arrêt)
-            proc.requestFreezeSlot (1, pressed);
+        if (pressed >= 0 && ! longFired)   // clic court
+        {
+            if (lastState[pressed] >= 1)      proc.requestFreezeSlot (1, pressed);    // pleine : rappel (ou arrêt)
+            else if (lastState[pressed] == 0)                                          // vide : mémorise la boucle gelée
+            {
+                if (freezeP->load() > 0.5f) proc.requestFreezeSlot (0, pressed);
+                else                        deniedStart[pressed] = juce::Time::getMillisecondCounter();   // sans Freeze : bref contour rouge
+            }
+        }
         pressed = -1;
     }
 
@@ -94,16 +102,19 @@ private:
     void timerCallback() override
     {
         const auto now = juce::Time::getMillisecondCounter();
-        if (pressed >= 0 && ! longFired && now - pressStart >= 500u)   // clic long : enregistrement
+        if (pressed >= 0 && ! longFired && now - pressStart >= 500u)   // clic long sur une mémoire pleine : effacement
         {
             longFired = true;
-            if (freezeP->load() > 0.5f) proc.requestFreezeSlot (0, pressed);   // il faut que Freeze tourne
-            else                        deniedStart[pressed] = now;            // sinon : bref contour rouge
+            if (lastState[pressed] >= 1)
+            {
+                proc.requestFreezeSlot (3, pressed);
+                flashStart[pressed] = now;   // bref scintillement de confirmation
+            }
         }
         for (int i = 0; i < bbdres::kNumFreezeSlots; ++i)
         {
             const int s = proc.uiSlotState[i].load (std::memory_order_relaxed);
-            if (lastState[i] == 2 && s != 2 && s >= 1) flashStart[i] = now;   // fin d'enregistrement : dernier scintillement
+            if (lastState[i] == 2 && s != 2) { if (s >= 1) flashStart[i] = now; else deniedStart[i] = now; }   // fin de mise en mémoire : scintillement (ou rouge si échec)
             lastState[i] = s;
             const unsigned v = proc.freezeBank.version (i);
             if (v != version[i])   // contenu modifié : forme d'onde à recalculer
