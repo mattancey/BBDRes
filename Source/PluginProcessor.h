@@ -1,5 +1,7 @@
 #pragma once
 
+#include <functional>
+
 #include <juce_audio_processors/juce_audio_processors.h>
 #include "Dsp/Resonator.h"
 #include "Dsp/Pitch.h"
@@ -8,13 +10,14 @@
 #include "Dsp/Voices.h"
 #include "Dsp/FreezeSlots.h"
 #include "Dsp/LoopPlayer.h"
+#include "Dsp/LoopRender.h"
 #include "Presets.h"
 
 class BBDResAudioProcessor : public juce::AudioProcessor
 {
 public:
     BBDResAudioProcessor();
-    ~BBDResAudioProcessor() override = default;
+    ~BBDResAudioProcessor() override { bounceThread.stopThread (4000); }
 
     void prepareToPlay (double sampleRate, int samplesPerBlock) override;
     void releaseResources() override {}
@@ -52,7 +55,8 @@ public:
     // Mémoires de boucles Freeze : enregistrées avec le PROJET (état du plug-in), jamais avec les presets
     bbdres::FreezeSlotBank freezeBank;
     std::atomic<int> uiSlotState[bbdres::kNumFreezeSlots];   // 0 vide, 1 pleine, 2 enregistrement, 3 lecture
-    void requestFreezeSlot (int type, int slot) { slotCommand.store (type * 8 + slot, std::memory_order_release); }   // 0 enregistrer, 1 rappeler / arrêter, 2 tout arrêter
+    // 0 enregistrer (mémoire vide : exporte la boucle gelée telle qu'elle joue), 1 rappeler / arrêter, 2 tout arrêter, 3 effacer
+    void requestFreezeSlot (int type, int slot) { slotCommand.store (type * 8 + slot, std::memory_order_release); }
     std::atomic<float> uiPitch { 48.0f };  // hauteur réelle du résonateur (LFO, quantification), lue par l'interface
 
 private:
@@ -125,7 +129,22 @@ private:
 
     double currentSampleRate = 44100.0;
     std::atomic<int> slotCommand { -1 };
-    bbdres::LoopRecorder recorder;
+    // Mise en mémoire d'une boucle : le fil audio décrit la boucle gelée (sans rien copier), un fil à part la rend
+    struct BounceVoice { bbdres::LoopExport ex[2]; float gl = 0.0f, gr = 0.0f; bool used = false; };
+    struct BounceJob
+    {
+        BounceVoice v[bbdres::kNumVoices];
+        int slot = -1;
+        float fs = 48000.0f;
+        std::atomic<bool> pending { false };
+    } bounceJob;
+    struct BounceThread : juce::Thread
+    {
+        BounceThread() : juce::Thread ("DarkSwan freeze bounce") {}
+        std::function<void()> work;
+        void run() override { while (! threadShouldExit()) { if (work) work(); wait (15); } }
+    } bounceThread;
+    void processBounceJob();
     bbdres::LoopPlayer players[2];   // deux lecteurs : un nouveau rappel fond vers le nouveau pendant que l'ancien s'éteint
     int activePlayer = 0;
     bbdres::Smoother holdPhaseSm;
