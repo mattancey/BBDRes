@@ -8,6 +8,7 @@
 #include "../Source/Dsp/Cqt.h"
 #include "../Source/Dsp/FreezeSlots.h"
 #include "../Source/Dsp/LoopPlayer.h"
+#include "../Source/Dsp/LoopRender.h"
 #include "../Source/Quotes.h"
 #include <chrono>
 #include "../Source/FactoryPresets.h"
@@ -857,44 +858,74 @@ static void testFreezeSlots()
         std::printf ("memoire : sinus 440 Hz a 44,1 kHz relu a 48 kHz = %.1f Hz (%zu echantillons)\n", hz, out.size());
         check (std::fabs (hz - 440.0) < 2.0, "memoire : le reechantillonnage change la hauteur");
     }
-    // aller-retour avec un vrai looper : la lecture mémorisée prolonge exactement la boucle gelée
+    // export exact : le cycle rendu est celui que le Freeze joue (même fenêtre, même point de boucle, même longueur)
     std::vector<float> src;
     { float lp = 0.0f; for (int i = 0; i < 48000 * 6; ++i) { lp += 0.05f * (0.3f * rnd() - lp); src.push_back (lp * 4.0f); } }
-    Resonator r; r.prepare (fs, 1u);
-    ResonatorParams p; p.semitones = 48.0f; p.feedback = 0.7f; p.inputLpHz = 8000.0f; p.loopLpHz = 6000.0f; p.bbd = 0.3f; p.holdSeconds = 0.3f;
-    r.update (p); r.reset();
-    size_t k = 0;
-    auto step = [&] { if (k % 16 == 0) r.update (p); const float y = r.process (src[k % src.size()]); ++k; return y; };
-    for (int i = 0; i < 96000; ++i) step();
-    p.freeze = 1.0f;
-    for (int i = 0; i < 48000; ++i) step();
-    check (r.isFrozen(), "memoire : le looper n'est pas fige");
+    auto liveLoop = [&] (float phase, std::vector<float>& live, bbdres::LoopExport& ex, std::vector<float>& cycle)
+    {
+        Resonator r; r.prepare (fs, 1u);
+        ResonatorParams p; p.semitones = 48.0f; p.feedback = 0.7f; p.inputLpHz = 8000.0f; p.loopLpHz = 6000.0f; p.bbd = 0.3f; p.holdSeconds = 0.3f; p.holdPhase = phase;
+        r.update (p); r.reset();
+        size_t k = 0;
+        auto step = [&] { if (k % 16 == 0) r.update (p); r.process (src[k % src.size()]); ++k; };
+        for (int i = 0; i < 96000; ++i) step();
+        p.freeze = 1.0f;
+        step();                                   // le gel démarre : la lecture part du point de boucle (+ phase)
+        live.assign (1, r.loopPreOut());
+        check (r.exportLoop (ex), "memoire : la boucle gelee n'est pas exportable");
+        for (int i = 0; i < 3 * ex.L; ++i) { step(); live.push_back (r.loopPreOut()); }
+        cycle.assign ((size_t) ex.L, 0.0f);
+        bbdres::renderLoopCycle (ex, 1.0f, cycle);
+        check (ex.stillValid(), "memoire : le contenu exporte a ete remplace");
+    };
+    std::vector<float> live0, cyc0; bbdres::LoopExport ex0;
+    liveLoop (0.0f, live0, ex0, cyc0);
+    const int len = ex0.L, pre = ex0.X;
+    double s2 = 0.0; for (float v : cyc0) s2 += (double) v * v;
+    const float rms = (float) std::sqrt (s2 / (double) len);
+    float eExact = 0.0f;
+    for (int q = 0; q < len; ++q) eExact = std::max (eExact, std::fabs (cyc0[(size_t) q] - live0[(size_t) (len + q)]));
+    std::printf ("memoire : export exact, phase 0 : longueur %d (attendu 14400), ecart max avec la boucle jouee %.6f (niveau %.3f)\n", len, eExact, rms);
+    check (len == 14400, "memoire : longueur de la boucle exportee");
+    check (eExact < 0.002f * rms, "memoire : le cycle rendu differe de la boucle jouee");
 
+    // la phase reglee au moment du clic n'y change rien : même point de boucle, même contenu (seule la lecture en direct tourne)
+    std::vector<float> live1, cyc1; bbdres::LoopExport ex1;
+    liveLoop (0.3f, live1, ex1, cyc1);
+    float eSame = 0.0f; for (int q = 0; q < len; ++q) eSame = std::max (eSame, std::fabs (cyc0[(size_t) q] - cyc1[(size_t) q]));
+    const int rot = (int) std::lround (0.3 * len);
+    float eRot = 0.0f; for (int q = 0; q < len; ++q) eRot = std::max (eRot, std::fabs (cyc0[(size_t) ((q + rot) % len)] - live1[(size_t) (len + q)]));
+    std::printf ("memoire : phase 30 %% au moment du clic : cycle identique (ecart %.6f), lecture en direct tournee de %d echantillons (ecart %.6f)\n", eSame, rot, eRot);
+    check (eSame < 0.002f * rms, "memoire : la phase du Freeze change le cycle memorise");
+    check (eRot < 0.002f * rms, "memoire : la lecture en direct n'est pas la boucle tournee");
+
+    // mise en mémoire puis lecture : strictement la boucle du Freeze (le fondu du lecteur est sans effet)
     bbdres::FreezeSlotBank bank; bank.prepare (fs);
-    bbdres::LoopRecorder rec; rec.prepare (fs);
-    const int len = r.loopLength(), pre = (int) (Resonator::kFadeSeconds * fs);
-    check (rec.start (2, len, pre), "memoire : l'enregistreur refuse de demarrer");
-    while (rec.active()) { step(); const float v = r.loopPreOut(); rec.push (v, -0.5f * v); }
-    bank.commit (rec.slotIndex(), rec.left(), rec.right(), rec.length(), rec.preroll());
-    check (bank.used (2) && ! bank.used (0) && bank.total (2) == len + pre, "memoire : banque apres enregistrement");
+    const auto bufL = bbdres::makeSlotBuffer (cyc0, pre);
+    std::vector<float> bufR (bufL.size());
+    for (size_t i = 0; i < bufL.size(); ++i) bufR[i] = -0.5f * bufL[i];
+    bank.load (2, bufL, bufR, fs, pre);
+    check (bank.used (2) && ! bank.used (0) && bank.total (2) == len + pre, "memoire : banque apres mise en memoire");
     const auto pk = bank.peaks (2, 32);
     check (pk.size() == 32 && *std::max_element (pk.begin(), pk.end()) > 0.01f, "memoire : forme d'onde vide");
 
     bbdres::LoopPlayer pl; pl.prepare (fs); pl.setFilters (20.0f, 20000.0f);
     check (pl.start (bank.leftData (2), bank.rightData (2), bank.total (2), bank.preroll (2), 2, 0.0f), "memoire : le lecteur refuse de demarrer");
-    float maxErr = 0.0f, maxErrR = 0.0f; double s2 = 0.0;
-    for (int i = 0; i < 2 * len; ++i)
+    float maxErr = 0.0f, maxErrR = 0.0f;
+    for (int i = 0; i < 3 * len; ++i)
     {
-        step();
-        const float want = r.loopPreOut();
         float ol, orr; pl.process (ol, orr);
+        const float want = cyc0[(size_t) (i % len)];
         maxErr = std::max (maxErr, std::fabs (ol - want));
         maxErrR = std::max (maxErrR, std::fabs (orr + 0.5f * want));
-        s2 += (double) want * want;
     }
-    const float rms = (float) std::sqrt (s2 / (2.0 * len));
-    std::printf ("memoire : lecture vs boucle gelee d'origine, sur 2 tours : ecart max %.5f (gauche), %.5f (droite), niveau %.3f\n", maxErr, maxErrR, rms);
-    check (maxErr < 0.01f * rms && maxErrR < 0.01f * rms, "memoire : la lecture ne prolonge pas la boucle d'origine");
+    std::printf ("memoire : lecture vs cycle du Freeze, sur 3 tours : ecart max %.7f (gauche), %.7f (droite)\n", maxErr, maxErrR);
+    check (maxErr < 1.0e-5f && maxErrR < 1.0e-5f, "memoire : la lecture n'est pas une reproduction exacte");
+
+    // effacement : la mémoire redevient vide
+    bank.clear (2);
+    check (! bank.used (2), "memoire : effacement");
+    bank.load (2, bufL, bufR, fs, pre);
 
     // phase : la lecture est tournee de la fraction demandee
     bbdres::LoopPlayer p0, p1; p0.prepare (fs); p1.prepare (fs); p0.setFilters (20.0f, 20000.0f); p1.setFilters (20.0f, 20000.0f);
