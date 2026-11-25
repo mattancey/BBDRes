@@ -6,11 +6,13 @@
 #include "../Source/Dsp/Sequencer.h"
 #include "../Source/Dsp/Voices.h"
 #include "../Source/Dsp/Cqt.h"
+#include "../Source/Dsp/Drive.h"
 #include "../Source/Dsp/FreezeSlots.h"
 #include "../Source/Dsp/LoopPlayer.h"
 #include "../Source/Dsp/LoopRender.h"
 #include "../Source/Quotes.h"
 #include <chrono>
+#include <complex>
 #include "../Source/FactoryPresets.h"
 #include <map>
 #include <cstdio>
@@ -956,6 +958,161 @@ static void testFreezeSlots()
     check (bank.exportSlot (2, el, er, esr, epre) && esr == 44100.0f, "memoire : export");
 }
 
+// Suréchantillonnage x2 de la saturation d'entrée : réponse du demi-bande, aliasing mesuré, équivalence avec l'ancien chemin
+static void fftInPlace (std::vector<std::complex<double>>& a)
+{
+    const size_t n = a.size();
+    for (size_t i = 1, j = 0; i < n; ++i)
+    {
+        size_t bit = n >> 1;
+        for (; j & bit; bit >>= 1) j ^= bit;
+        j ^= bit;
+        if (i < j) std::swap (a[i], a[j]);
+    }
+    for (size_t len = 2; len <= n; len <<= 1)
+    {
+        const double ang = -2.0 * 3.14159265358979323846 / (double) len;
+        const std::complex<double> wl (std::cos (ang), std::sin (ang));
+        for (size_t i = 0; i < n; i += len)
+        {
+            std::complex<double> w (1.0, 0.0);
+            for (size_t k = 0; k < len / 2; ++k)
+            {
+                const auto u = a[i + k], v = a[i + k + len / 2] * w;
+                a[i + k] = u + v;
+                a[i + k + len / 2] = u - v;
+                w *= wl;
+            }
+        }
+    }
+}
+
+static void testOversampling()
+{
+    const int N = 32768;                 // longueur d'analyse à la fréquence normale
+    const double binHz = 48000.0 / (double) N;
+    const double pi = 3.14159265358979323846;
+
+    // 1) montée : une sinusoïde de 10 kHz ne doit laisser aucune image à 48 - 10 = 38 kHz
+    {
+        const int k = (int) std::lround (10000.0 / binHz);
+        bbdres::HalfBandUp up;
+        std::vector<std::complex<double>> y ((size_t) (2 * N));
+        for (int n = 0; n < 4 * N; ++n)
+        {
+            double e, o; up.process (std::sin (2.0 * pi * (double) k * n / (double) N), e, o);
+            if (n >= 3 * N) { y[(size_t) (2 * (n - 3 * N))] = e; y[(size_t) (2 * (n - 3 * N) + 1)] = o; }
+        }
+        fftInPlace (y);
+        const double tone = std::abs (y[(size_t) k]), image = std::abs (y[(size_t) (N - k)]);
+        std::printf ("suréchantillonnage : montée, image de 10 kHz a 38 kHz : %.1f dB (ton %.4f)\n", 20.0 * std::log10 (image / tone + 1.0e-30), tone * 2.0 / (2.0 * N));
+        check (20.0 * std::log10 (image / tone + 1.0e-30) < -90.0, "demi-bande : image mal rejetee a la montee");
+    }
+    // 2) descente : une sinusoïde de 38 kHz (à 96 kHz) ne doit pas se replier à 10 kHz
+    {
+        const int kh = (int) std::lround (38000.0 / binHz);
+        bbdres::HalfBandDown dn;
+        std::vector<std::complex<double>> y ((size_t) N);
+        for (int n = 0; n < 4 * N; ++n)
+        {
+            const double r = dn.process (std::sin (2.0 * pi * (double) kh * (double) (2 * n) / (double) (2 * N)),
+                                         std::sin (2.0 * pi * (double) kh * (double) (2 * n + 1) / (double) (2 * N)));
+            if (n >= 3 * N) y[(size_t) (n - 3 * N)] = r;
+        }
+        fftInPlace (y);
+        const double alias = std::abs (y[(size_t) (N - kh)]) * 2.0 / (double) N;
+        std::printf ("suréchantillonnage : descente, 38 kHz repliee a 10 kHz : %.1f dB\n", 20.0 * std::log10 (alias + 1.0e-30));
+        check (20.0 * std::log10 (alias + 1.0e-30) < -90.0, "demi-bande : repliement mal rejete a la descente");
+    }
+    // 3) montée + descente (saturation à zéro) : gain et retard
+    {
+        std::printf ("suréchantillonnage : gain et retard de la chaîne complète (saturation a zero) :\n");
+        for (double hz : { 100.0, 1000.0, 5000.0, 10000.0, 15000.0, 20000.0 })
+        {
+            const int k = (int) std::lround (hz / binHz);
+            bbdres::DriveStage d; d.prepare (48000.0f); d.update (0.0f, 0);
+            std::complex<double> acc (0.0, 0.0);
+            for (int n = 0; n < 4 * N; ++n)
+            {
+                const double x = std::sin (2.0 * pi * (double) k * n / (double) N);
+                const double y = (double) d.process ((float) x);
+                if (n >= 3 * N) acc += y * std::polar (1.0, -2.0 * pi * (double) k * n / (double) N);
+            }
+            const double amp = std::abs (acc) * 2.0 / (double) N;
+            const double phase = std::arg (acc * std::complex<double> (0.0, 1.0));   // sin = cos déphasé de pi/2
+            const double delay = -phase / (2.0 * pi * (double) k / (double) N);
+            if (hz <= 5000.0) std::printf ("    %6.0f Hz : gain %+.5f dB, retard %.2f echantillons (%.3f ms)\n", hz, 20.0 * std::log10 (amp), delay, delay / 48.0);
+            else              std::printf ("    %6.0f Hz : gain %+.5f dB\n", hz, 20.0 * std::log10 (amp));
+            check (std::fabs (20.0 * std::log10 (amp)) < 0.01, "demi-bande : bande passante non plate");
+        }
+    }
+    // 4) aliasing de chaque courbe, à 1x et à 2x : tout ce qui n'est pas une vraie harmonique est un repliement
+    {
+        const char* names[3] = { "douce", "asymetrique", "repli d'onde" };
+        for (int k : { 2093, 4001 })                       // 3066 Hz et 5862 Hz, premiers avec N : les replis tombent hors des harmoniques
+        {
+        std::printf ("saturation : repliement (hors harmoniques) relatif au fondamental, ton %.0f Hz d'amplitude 0,7 :\n", (double) k * binHz);
+        for (float drive : { 1.0f, 0.5f })
+            for (int curve = 0; curve < 3; ++curve)
+            {
+                double aliasDb[2], spurDb[2];
+                for (int os = 0; os < 2; ++os)
+                {
+                    bbdres::DriveStage d; d.prepare (os ? 48000.0f : 96000.0f); d.update (drive, curve);
+                    std::vector<std::complex<double>> y ((size_t) N);
+                    for (int n = 0; n < 4 * N; ++n)
+                    {
+                        const float v = d.process ((float) (0.7 * std::sin (2.0 * pi * (double) k * n / (double) N)));
+                        if (n >= 3 * N) y[(size_t) (n - 3 * N)] = v;
+                    }
+                    fftInPlace (y);
+                    const double fund = std::abs (y[(size_t) k]);
+                    double total = 0.0, spur = 0.0;
+                    for (int j = 1; j < N / 2; ++j)
+                    {
+                        bool harmonic = false;
+                        for (int m = 1; m * k < N / 2; ++m) if (std::abs (j - m * k) <= 1) harmonic = true;
+                        if (harmonic) continue;
+                        const double a = std::abs (y[(size_t) j]);
+                        total += a * a;
+                        spur = std::max (spur, a);
+                    }
+                    aliasDb[os] = 10.0 * std::log10 (total / (fund * fund) + 1.0e-30);
+                    spurDb[os] = 20.0 * std::log10 (spur / fund + 1.0e-30);
+                }
+                std::printf ("    drive %.1f, %-13s : total %6.1f dB -> %6.1f dB  (gain %+5.1f dB) ; pic isole %6.1f dB -> %6.1f dB\n",
+                             drive, names[curve], aliasDb[0], aliasDb[1], aliasDb[0] - aliasDb[1], spurDb[0], spurDb[1]);
+                check (aliasDb[1] < aliasDb[0] - 3.0, "saturation : le x2 n'ameliore pas le repliement");
+            }
+        }
+    }
+    // 5) sans suréchantillonnage (96 kHz et plus), la chaîne est celle d'avant : sortie identique à la saturation de Resonator
+    {
+        Resonator a, b; a.prepare (96000.0f, 1u); b.prepare (96000.0f, 1u);
+        ResonatorParams p; p.drive = 0.7f; p.curve = 2; p.feedback = 0.8f;
+        a.update (p); b.update (p); a.reset(); b.reset();
+        bbdres::DriveStage d; d.prepare (96000.0f); d.update (0.7f, 2);
+        check (! d.isOversampled(), "chaine : 96 kHz doit etre sans suréchantillonnage");
+        float maxDiff = 0.0f;
+        for (int i = 0; i < 20000; ++i)
+        {
+            const float x = 0.6f * rnd();
+            maxDiff = std::max (maxDiff, std::fabs (a.process (x) - b.processDriven (d.process (x))));
+        }
+        std::printf ("chaine : ecart entre l'ancienne saturation (dans la voix) et la saturation partagee a 1x : %.9f\n", maxDiff);
+        check (maxDiff < 1.0e-6f, "chaine : la saturation partagee differe de l'ancienne");
+    }
+    // 6) coût
+    {
+        bbdres::DriveStage d; d.prepare (48000.0f); d.update (1.0f, 2);
+        const auto t0 = std::chrono::steady_clock::now();
+        float acc = 0.0f;
+        for (int i = 0; i < 2000000; ++i) acc += d.process (0.5f * std::sin ((float) i * 0.05f));
+        const double ns = std::chrono::duration<double, std::nano> (std::chrono::steady_clock::now() - t0).count() / 2.0e6;
+        std::printf ("saturation x2 : %.1f ns par echantillon et par canal, soit %.3f %% d'un coeur a 48 kHz en stereo (somme %.2f)\n", ns, ns * 96000.0 / 1.0e9 * 100.0, acc);
+    }
+}
+
 // Pas de clic quand le BBD quitte zéro (le filtre ne doit pas s'enclencher d'un coup)
 static void testBbdClick()
 {
@@ -1145,6 +1302,7 @@ int main()
     testSeqTransition();
     testHoldPhase();
     testFreezeSlots();
+    testOversampling();
     testNoiseAndBbd();
     testBbdClick();
     for (float cr : { 0.25f, 0.5f, 1.0f })
