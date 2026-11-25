@@ -11,6 +11,7 @@
 #include "Dsp/FreezeSlots.h"
 #include "Dsp/LoopPlayer.h"
 #include "Dsp/LoopRender.h"
+#include "Dsp/Drive.h"
 #include "Presets.h"
 
 class BBDResAudioProcessor : public juce::AudioProcessor
@@ -148,6 +149,7 @@ private:
     bbdres::LoopPlayer players[2];   // deux lecteurs : un nouveau rappel fond vers le nouveau pendant que l'ancien s'éteint
     int activePlayer = 0;
     bbdres::Smoother holdPhaseSm;
+    bbdres::DriveStage driveStage[2];   // saturation d'entrée : une fois par canal, suréchantillonnée x2
     void updateSlotStates();
     bbdres::SeqTransition seqTrans;   // glide d'environ 10 % d'un pas quand le contenu de la séquence change
     unsigned lastSeqHash = 0;
