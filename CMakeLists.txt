@@ -39,6 +39,7 @@ target_sources(BBDResV2 PRIVATE
     Source/Dsp/Sequencer.h
     Source/Dsp/Voices.h
     Source/Dsp/Cqt.h
+    Source/Dsp/Drive.h
     Source/Dsp/FreezeSlots.h
     Source/Dsp/LoopPlayer.h
     Source/Dsp/LoopRender.h
