@@ -3,6 +3,7 @@
 // Coeur DSP de BBDRes : C++ standard uniquement (aucune dépendance JUCE),
 // pour pouvoir être testé séparément du plug-in.
 
+#include "Drive.h"
 #include <algorithm>
 #include <atomic>
 #include <cmath>
@@ -349,12 +350,19 @@ public:
     }
 
     // crossV : sortie de boucle de l'autre canal (ignorée si cross = 0)
+    // Entrée brute : applique la saturation à la fréquence normale (utilisé par les tests ; le plug-in sature une fois par canal,
+    // avec suréchantillonnage, et appelle processDriven)
     float process (float x, float crossV = 0.0f)
     {
-        // Drive (courbe choisie), puis filtre d'entrée, blocage du continu et gain
         float s = x;
         if (driveMix > 0.0f)
             s = x + (shape (x * driveGain) * driveComp - x) * driveMix;
+        return processDriven (s, crossV);
+    }
+
+    // Entrée déjà saturée : filtre d'entrée, blocage du continu et gain, puis la boucle
+    float processDriven (float s, float crossV = 0.0f)
+    {
         const float in = dc.process (inLp.process (s)) * inGain;
 
         // Jitter d'horloge : petites variations aléatoires du temps de retard
@@ -546,15 +554,7 @@ private:
         frozen = true;
     }
 
-    float shape (float x) const
-    {
-        switch (curve)
-        {
-            case 1:  return std::tanh (x + 0.4f) - 0.37994896f;  // asymétrique (tanh(0.4))
-            case 2:  return std::sin (x);                          // repli d'onde
-            default: return std::tanh (x);                         // douce
-        }
-    }
+    float shape (float x) const { return driveShape (curve, x); }
     float nextNoise()
     {
         rng ^= rng << 13; rng ^= rng >> 17; rng ^= rng << 5;
