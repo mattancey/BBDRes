@@ -437,6 +437,7 @@ void BBDResAudioProcessor::prepareToPlay (double sampleRate, int)
     noiseGate.prepare (controlRate);
     holdPhaseSm.prepare (controlRate, 0.03f);   // la phase du Freeze est lissée : les déplacements du potard restent réguliers
     freezeBank.prepare (fs);   // (ré)alloue les mémoires de boucles, en conservant leur contenu
+    for (auto& d : driveStage) d.prepare ((float) fs);   // x2 en dessous de 80 kHz, sinon rien
     for (auto& pl : players) pl.prepare (fs);
     activePlayer = 0;
 
@@ -690,6 +691,7 @@ void BBDResAudioProcessor::processBlock (juce::AudioBuffer<float>& buffer, juce:
         rp.inputLpHz = std::exp2 (inSm.next (t.inLog2));
         rp.drive     = driveSm.next (t.drive);
         rp.curve     = t.curve;
+        for (auto& d : driveStage) d.update (rp.drive, rp.curve);
         rp.bbd       = bbdSm.next (t.bbd);
         rp.holdHpHz  = std::exp2 (holdHpSm.next (t.holdHpLog2));
         rp.lowCutHz  = std::exp2 (lowCutSm.next (t.lowCutLog2));
@@ -755,6 +757,9 @@ void BBDResAudioProcessor::processBlock (juce::AudioBuffer<float>& buffer, juce:
 
             // Somme des voix : chacune reçoit le même signal d'entrée
             float wetSum[2] = { 0.0f, 0.0f };
+            float driven[2] = { 0.0f, 0.0f };   // saturation d'entrée : une seule fois par canal, suréchantillonnée x2, puis partagée par les voix
+            for (int c = 0; c < numCh; ++c)
+                driven[c] = driveStage[c].process (data[c][start + i]);
             for (int v = 0; v < bbdres::kNumVoices; ++v)
             {
                 if (! voiceActive[v]) continue;
@@ -763,7 +768,7 @@ void BBDResAudioProcessor::processBlock (juce::AudioBuffer<float>& buffer, juce:
                 for (int c = 0; c < numCh; ++c)
                 {
                     const float gain = c == 0 ? voiceGainL[v] : voiceGainR[v];
-                    wetSum[c] += gain * resonators[v][c].process (data[c][start + i], crossIn[c]);
+                    wetSum[c] += gain * resonators[v][c].processDriven (driven[c], crossIn[c]);
                 }
             }
 
